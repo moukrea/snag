@@ -182,3 +182,78 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_session_id_length() {
+        let id = generate_session_id();
+        assert_eq!(id.len(), 16); // 8 bytes -> 16 hex chars
+    }
+
+    #[test]
+    fn test_generate_session_id_unique() {
+        let ids: Vec<SessionId> = (0..100).map(|_| generate_session_id()).collect();
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                assert_ne!(ids[i], ids[j], "duplicate session ID generated");
+            }
+        }
+    }
+
+    #[test]
+    fn test_generate_session_id_hex() {
+        let id = generate_session_id();
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_validate_session_name_valid() {
+        assert!(validate_session_name("dev").is_ok());
+        assert!(validate_session_name("ci-runner").is_ok());
+        assert!(validate_session_name("staging.deploy").is_ok());
+        assert!(validate_session_name("test_session").is_ok());
+        assert!(validate_session_name("a").is_ok());
+        assert!(validate_session_name("A1B2").is_ok());
+        assert!(validate_session_name("foo-bar.baz_qux").is_ok());
+    }
+
+    #[test]
+    fn test_validate_session_name_invalid_chars() {
+        assert!(validate_session_name("hello world").is_err());
+        assert!(validate_session_name("foo/bar").is_err());
+        assert!(validate_session_name("foo:bar").is_err());
+        assert!(validate_session_name("foo@bar").is_err());
+        assert!(validate_session_name("foo#bar").is_err());
+        assert!(validate_session_name("café").is_err());
+    }
+
+    #[test]
+    fn test_validate_session_name_empty() {
+        assert!(validate_session_name("").is_err());
+    }
+
+    #[test]
+    fn test_validate_session_name_too_long() {
+        let long_name = "a".repeat(65);
+        assert!(validate_session_name(&long_name).is_err());
+
+        let max_name = "a".repeat(64);
+        assert!(validate_session_name(&max_name).is_ok());
+    }
+
+    #[test]
+    fn test_chrono_now_format() {
+        let ts = chrono_now();
+        // Should match ISO 8601 pattern: YYYY-MM-DDTHH:MM:SSZ
+        assert_eq!(ts.len(), 20);
+        assert_eq!(&ts[4..5], "-");
+        assert_eq!(&ts[7..8], "-");
+        assert_eq!(&ts[10..11], "T");
+        assert_eq!(&ts[13..14], ":");
+        assert_eq!(&ts[16..17], ":");
+        assert_eq!(&ts[19..20], "Z");
+    }
+}

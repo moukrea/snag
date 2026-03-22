@@ -1,4 +1,4 @@
-use crate::tui::app::App;
+use crate::tui::app::{App, InputMode};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -75,15 +75,32 @@ pub fn draw(frame: &mut Frame, app: &App) {
     frame.render_widget(preview, chunks[1]);
 
     // Status bar
-    let show_adopted_indicator = if app.show_adopted {
-        "[a]dopted:ON"
-    } else {
-        "[a]dopted:OFF"
+    let status_text = match app.input_mode {
+        InputMode::Normal => {
+            let show_adopted_indicator = if app.show_adopted {
+                "[a]dopted:ON"
+            } else {
+                "[a]dopted:OFF"
+            };
+            format!(" [n]ew [x]kill [r]ename [s]end [Enter]attach {show_adopted_indicator} [q]uit")
+        }
+        InputMode::Rename => {
+            format!(" Rename: {}█  [Enter]confirm [Esc]cancel", app.input_buffer)
+        }
+        InputMode::Send => {
+            format!(
+                " Send command: {}█  [Enter]confirm [Esc]cancel",
+                app.input_buffer
+            )
+        }
     };
-    let status = Paragraph::new(Line::from(vec![Span::styled(
-        format!(" [n]ew [k]ill [r]ename [s]end [Enter]attach {show_adopted_indicator} [q]uit"),
-        Style::default().fg(Color::DarkGray),
-    )]));
+
+    let status_style = match app.input_mode {
+        InputMode::Normal => Style::default().fg(Color::DarkGray),
+        _ => Style::default().fg(Color::Yellow),
+    };
+
+    let status = Paragraph::new(Line::from(vec![Span::styled(status_text, status_style)]));
     frame.render_widget(status, chunks[2]);
 }
 

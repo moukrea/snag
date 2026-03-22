@@ -108,3 +108,352 @@ pub fn decode_response(msg_type: u8, payload: &[u8]) -> Result<Response> {
             .map_err(|e| SnagError::ProtocolError(format!("decode error: {e}"))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_request_roundtrip_session_new() {
+        let req = Request::SessionNew {
+            shell: Some("/bin/zsh".to_string()),
+            name: Some("dev".to_string()),
+            cwd: Some("/home/user".to_string()),
+        };
+        let frame = encode_request(&req).unwrap();
+        assert_eq!(frame[0], MSG_SESSION_NEW);
+        let len = u32::from_le_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
+        assert_eq!(frame.len(), 5 + len);
+        let decoded = decode_request(frame[0], &frame[5..]).unwrap();
+        match decoded {
+            Request::SessionNew { shell, name, cwd } => {
+                assert_eq!(shell.as_deref(), Some("/bin/zsh"));
+                assert_eq!(name.as_deref(), Some("dev"));
+                assert_eq!(cwd.as_deref(), Some("/home/user"));
+            }
+            _ => panic!("wrong request type"),
+        }
+    }
+
+    #[test]
+    fn test_request_roundtrip_session_kill() {
+        let req = Request::SessionKill {
+            target: "dev".to_string(),
+        };
+        let frame = encode_request(&req).unwrap();
+        assert_eq!(frame[0], MSG_SESSION_KILL);
+        let decoded = decode_request(frame[0], &frame[5..]).unwrap();
+        match decoded {
+            Request::SessionKill { target } => assert_eq!(target, "dev"),
+            _ => panic!("wrong request type"),
+        }
+    }
+
+    #[test]
+    fn test_request_roundtrip_session_list() {
+        let req = Request::SessionList { all: true };
+        let frame = encode_request(&req).unwrap();
+        assert_eq!(frame[0], MSG_SESSION_LIST);
+        let decoded = decode_request(frame[0], &frame[5..]).unwrap();
+        match decoded {
+            Request::SessionList { all } => assert!(all),
+            _ => panic!("wrong request type"),
+        }
+    }
+
+    #[test]
+    fn test_request_roundtrip_session_attach() {
+        let req = Request::SessionAttach {
+            target: "abc123".to_string(),
+            read_only: true,
+        };
+        let frame = encode_request(&req).unwrap();
+        assert_eq!(frame[0], MSG_SESSION_ATTACH);
+        let decoded = decode_request(frame[0], &frame[5..]).unwrap();
+        match decoded {
+            Request::SessionAttach { target, read_only } => {
+                assert_eq!(target, "abc123");
+                assert!(read_only);
+            }
+            _ => panic!("wrong request type"),
+        }
+    }
+
+    #[test]
+    fn test_request_roundtrip_session_send() {
+        let req = Request::SessionSend {
+            target: "dev".to_string(),
+            input: "cargo test".to_string(),
+        };
+        let frame = encode_request(&req).unwrap();
+        assert_eq!(frame[0], MSG_SESSION_SEND);
+        let decoded = decode_request(frame[0], &frame[5..]).unwrap();
+        match decoded {
+            Request::SessionSend { target, input } => {
+                assert_eq!(target, "dev");
+                assert_eq!(input, "cargo test");
+            }
+            _ => panic!("wrong request type"),
+        }
+    }
+
+    #[test]
+    fn test_request_roundtrip_resize() {
+        let req = Request::Resize {
+            cols: 120,
+            rows: 40,
+        };
+        let frame = encode_request(&req).unwrap();
+        assert_eq!(frame[0], MSG_RESIZE);
+        let decoded = decode_request(frame[0], &frame[5..]).unwrap();
+        match decoded {
+            Request::Resize { cols, rows } => {
+                assert_eq!(cols, 120);
+                assert_eq!(rows, 40);
+            }
+            _ => panic!("wrong request type"),
+        }
+    }
+
+    #[test]
+    fn test_request_roundtrip_pty_input() {
+        let data = b"hello world\r\n".to_vec();
+        let req = Request::PtyInput(data.clone());
+        let frame = encode_request(&req).unwrap();
+        assert_eq!(frame[0], MSG_PTY_INPUT);
+        let decoded = decode_request(frame[0], &frame[5..]).unwrap();
+        match decoded {
+            Request::PtyInput(d) => assert_eq!(d, data),
+            _ => panic!("wrong request type"),
+        }
+    }
+
+    #[test]
+    fn test_request_roundtrip_daemon_status() {
+        let req = Request::DaemonStatus;
+        let frame = encode_request(&req).unwrap();
+        assert_eq!(frame[0], MSG_DAEMON_STATUS);
+        let decoded = decode_request(frame[0], &frame[5..]).unwrap();
+        assert!(matches!(decoded, Request::DaemonStatus));
+    }
+
+    #[test]
+    fn test_request_roundtrip_session_rename() {
+        let req = Request::SessionRename {
+            target: "abc".to_string(),
+            new_name: "dev".to_string(),
+        };
+        let frame = encode_request(&req).unwrap();
+        assert_eq!(frame[0], MSG_SESSION_RENAME);
+        let decoded = decode_request(frame[0], &frame[5..]).unwrap();
+        match decoded {
+            Request::SessionRename { target, new_name } => {
+                assert_eq!(target, "abc");
+                assert_eq!(new_name, "dev");
+            }
+            _ => panic!("wrong request type"),
+        }
+    }
+
+    #[test]
+    fn test_request_roundtrip_session_output() {
+        let req = Request::SessionOutput {
+            target: "dev".to_string(),
+            lines: Some(10),
+            follow: true,
+        };
+        let frame = encode_request(&req).unwrap();
+        assert_eq!(frame[0], MSG_SESSION_OUTPUT);
+        let decoded = decode_request(frame[0], &frame[5..]).unwrap();
+        match decoded {
+            Request::SessionOutput {
+                target,
+                lines,
+                follow,
+            } => {
+                assert_eq!(target, "dev");
+                assert_eq!(lines, Some(10));
+                assert!(follow);
+            }
+            _ => panic!("wrong request type"),
+        }
+    }
+
+    #[test]
+    fn test_request_roundtrip_session_adopt() {
+        let req = Request::SessionAdopt {
+            pts_or_pid: "3".to_string(),
+            name: Some("adopted".to_string()),
+        };
+        let frame = encode_request(&req).unwrap();
+        assert_eq!(frame[0], MSG_SESSION_ADOPT);
+        let decoded = decode_request(frame[0], &frame[5..]).unwrap();
+        match decoded {
+            Request::SessionAdopt { pts_or_pid, name } => {
+                assert_eq!(pts_or_pid, "3");
+                assert_eq!(name.as_deref(), Some("adopted"));
+            }
+            _ => panic!("wrong request type"),
+        }
+    }
+
+    #[test]
+    fn test_response_roundtrip_ok_session_created() {
+        let resp = Response::Ok(ResponseData::SessionCreated {
+            id: "abcdef1234567890".to_string(),
+        });
+        let frame = encode_response(&resp).unwrap();
+        assert_eq!(frame[0], MSG_OK);
+        let decoded = decode_response(frame[0], &frame[5..]).unwrap();
+        match decoded {
+            Response::Ok(ResponseData::SessionCreated { id }) => {
+                assert_eq!(id, "abcdef1234567890");
+            }
+            _ => panic!("wrong response type"),
+        }
+    }
+
+    #[test]
+    fn test_response_roundtrip_ok_session_list() {
+        let resp = Response::Ok(ResponseData::SessionList(vec![SessionInfo {
+            id: "abc123".to_string(),
+            name: Some("dev".to_string()),
+            shell: "/bin/zsh".to_string(),
+            cwd: "/home/user".to_string(),
+            state: "running".to_string(),
+            fg_process: Some("cargo".to_string()),
+            attached: 1,
+            adopted: false,
+            created_at: "2026-03-22T10:00:00Z".to_string(),
+        }]));
+        let frame = encode_response(&resp).unwrap();
+        let decoded = decode_response(frame[0], &frame[5..]).unwrap();
+        match decoded {
+            Response::Ok(ResponseData::SessionList(sessions)) => {
+                assert_eq!(sessions.len(), 1);
+                assert_eq!(sessions[0].id, "abc123");
+                assert_eq!(sessions[0].name.as_deref(), Some("dev"));
+                assert_eq!(sessions[0].attached, 1);
+            }
+            _ => panic!("wrong response type"),
+        }
+    }
+
+    #[test]
+    fn test_response_roundtrip_error() {
+        let resp = Response::Error {
+            code: 42,
+            message: "session not found".to_string(),
+        };
+        let frame = encode_response(&resp).unwrap();
+        assert_eq!(frame[0], MSG_ERROR);
+        let decoded = decode_response(frame[0], &frame[5..]).unwrap();
+        match decoded {
+            Response::Error { code, message } => {
+                assert_eq!(code, 42);
+                assert_eq!(message, "session not found");
+            }
+            _ => panic!("wrong response type"),
+        }
+    }
+
+    #[test]
+    fn test_response_roundtrip_pty_output() {
+        let data = b"\x1b[32mhello\x1b[0m\r\n".to_vec();
+        let resp = Response::PtyOutput(data.clone());
+        let frame = encode_response(&resp).unwrap();
+        assert_eq!(frame[0], MSG_PTY_OUTPUT);
+        let decoded = decode_response(frame[0], &frame[5..]).unwrap();
+        match decoded {
+            Response::PtyOutput(d) => assert_eq!(d, data),
+            _ => panic!("wrong response type"),
+        }
+    }
+
+    #[test]
+    fn test_response_roundtrip_session_event() {
+        let resp = Response::SessionEvent {
+            event: "exited".to_string(),
+            session_id: "abc123".to_string(),
+        };
+        let frame = encode_response(&resp).unwrap();
+        assert_eq!(frame[0], MSG_SESSION_EVENT);
+        let decoded = decode_response(frame[0], &frame[5..]).unwrap();
+        match decoded {
+            Response::SessionEvent { event, session_id } => {
+                assert_eq!(event, "exited");
+                assert_eq!(session_id, "abc123");
+            }
+            _ => panic!("wrong response type"),
+        }
+    }
+
+    #[test]
+    fn test_response_roundtrip_daemon_status() {
+        let resp = Response::Ok(ResponseData::DaemonStatus {
+            pid: 12345,
+            uptime_secs: 3600,
+            session_count: 3,
+        });
+        let frame = encode_response(&resp).unwrap();
+        let decoded = decode_response(frame[0], &frame[5..]).unwrap();
+        match decoded {
+            Response::Ok(ResponseData::DaemonStatus {
+                pid,
+                uptime_secs,
+                session_count,
+            }) => {
+                assert_eq!(pid, 12345);
+                assert_eq!(uptime_secs, 3600);
+                assert_eq!(session_count, 3);
+            }
+            _ => panic!("wrong response type"),
+        }
+    }
+
+    #[test]
+    fn test_frame_header_size() {
+        let req = Request::SessionDetach;
+        let frame = encode_request(&req).unwrap();
+        assert!(frame.len() >= 5); // minimum: 5-byte header
+        let len = u32::from_le_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
+        assert_eq!(frame.len(), 5 + len);
+    }
+
+    #[tokio::test]
+    async fn test_read_write_frame_roundtrip() {
+        let req = Request::SessionNew {
+            shell: Some("/bin/bash".to_string()),
+            name: Some("test".to_string()),
+            cwd: None,
+        };
+        let frame = encode_request(&req).unwrap();
+
+        // Write to a buffer and read back
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &frame).await.unwrap();
+
+        let mut reader = &buf[..];
+        let result = read_frame(&mut reader).await.unwrap();
+        assert!(result.is_some());
+        let (msg_type, payload) = result.unwrap();
+        assert_eq!(msg_type, MSG_SESSION_NEW);
+
+        let decoded = decode_request(msg_type, &payload).unwrap();
+        match decoded {
+            Request::SessionNew { shell, name, cwd } => {
+                assert_eq!(shell.as_deref(), Some("/bin/bash"));
+                assert_eq!(name.as_deref(), Some("test"));
+                assert!(cwd.is_none());
+            }
+            _ => panic!("wrong request type"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_frame_eof() {
+        let buf: &[u8] = &[];
+        let result = read_frame(&mut &*buf).await.unwrap();
+        assert!(result.is_none());
+    }
+}

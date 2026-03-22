@@ -314,7 +314,7 @@ async fn handle_request(
         Request::SessionPs { target } => handle_session_ps(registry, &target),
         Request::SessionScan => handle_session_scan(),
         Request::SessionAdopt { pts_or_pid, name } => {
-            handle_session_adopt(registry, &pts_or_pid, name, scrollback_bytes)
+            handle_session_adopt(registry, &pts_or_pid, name, scrollback_bytes, event_tx).await
         }
         Request::Resize { cols, rows } => handle_resize(registry, clients, client_id, cols, rows),
         Request::PtyInput(data) => handle_pty_input(registry, clients, client_id, &data),
@@ -666,11 +666,12 @@ fn handle_session_scan() -> Response {
     }
 }
 
-fn handle_session_adopt(
+async fn handle_session_adopt(
     registry: &mut SessionRegistry,
     pts_or_pid: &str,
     name: Option<String>,
     scrollback_bytes: usize,
+    event_tx: &mpsc::Sender<DaemonEvent>,
 ) -> Response {
     // Validate name if provided
     if let Some(ref n) = name {
@@ -727,6 +728,15 @@ fn handle_session_adopt(
                 PathBuf::from(&discovered.pts),
                 scrollback_bytes,
             );
+
+            // Start PTY read loop for adopted session
+            let master_raw = session.raw_fd();
+            let session_id = id.clone();
+            let tx = event_tx.clone();
+            tokio::spawn(async move {
+                pty_read_loop(session_id, master_raw, tx).await;
+            });
+
             registry.insert(session);
             Response::Ok(ResponseData::SessionCreated { id })
         }

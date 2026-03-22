@@ -141,3 +141,157 @@ impl SessionRegistry {
         self.sessions.keys().cloned().collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::ringbuf::RingBuffer;
+    use crate::daemon::session::SessionState;
+    use nix::unistd::Pid;
+    use std::time::Instant;
+
+    fn make_test_session(id: &str, name: Option<&str>) -> Session {
+        // Create a dummy fd using a pipe
+        let (read_fd, _write_fd) = nix::unistd::pipe().unwrap();
+        Session {
+            id: id.to_string(),
+            name: name.map(|s| s.to_string()),
+            master_fd: read_fd,
+            child_pid: Some(Pid::from_raw(1)),
+            shell: "/bin/sh".to_string(),
+            pts_path: std::path::PathBuf::from("/dev/pts/0"),
+            state: SessionState::Running,
+            created_at: Instant::now(),
+            created_at_utc: "2026-01-01T00:00:00Z".to_string(),
+            scrollback: RingBuffer::new(1024),
+            attached_clients: Vec::new(),
+            adopted: false,
+        }
+    }
+
+    #[test]
+    fn test_insert_and_get() {
+        let mut reg = SessionRegistry::new();
+        let session = make_test_session("abc123", Some("dev"));
+        reg.insert(session);
+
+        assert_eq!(reg.len(), 1);
+        assert!(reg.get("abc123").is_some());
+        assert_eq!(reg.get("abc123").unwrap().name.as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn test_resolve_exact_name() {
+        let mut reg = SessionRegistry::new();
+        reg.insert(make_test_session("abc123def456", Some("dev")));
+        reg.insert(make_test_session("xyz789ghi012", Some("ci")));
+
+        let resolved = reg.resolve("dev").unwrap();
+        assert_eq!(resolved, "abc123def456");
+    }
+
+    #[test]
+    fn test_resolve_exact_id() {
+        let mut reg = SessionRegistry::new();
+        reg.insert(make_test_session("abc123def456", None));
+
+        let resolved = reg.resolve("abc123def456").unwrap();
+        assert_eq!(resolved, "abc123def456");
+    }
+
+    #[test]
+    fn test_resolve_id_prefix() {
+        let mut reg = SessionRegistry::new();
+        reg.insert(make_test_session("abc123def456", None));
+
+        let resolved = reg.resolve("abc").unwrap();
+        assert_eq!(resolved, "abc123def456");
+    }
+
+    #[test]
+    fn test_resolve_prefix_too_short() {
+        let mut reg = SessionRegistry::new();
+        reg.insert(make_test_session("abc123def456", None));
+
+        // 2 chars is too short for prefix match
+        assert!(reg.resolve("ab").is_err());
+    }
+
+    #[test]
+    fn test_resolve_ambiguous() {
+        let mut reg = SessionRegistry::new();
+        reg.insert(make_test_session("abc123", None));
+        reg.insert(make_test_session("abc456", None));
+
+        let err = reg.resolve("abc").unwrap_err();
+        assert!(matches!(err, SnagError::SessionAmbiguousTarget(_, _)));
+    }
+
+    #[test]
+    fn test_resolve_not_found() {
+        let mut reg = SessionRegistry::new();
+        reg.insert(make_test_session("abc123", Some("dev")));
+
+        let err = reg.resolve("nonexistent").unwrap_err();
+        assert!(matches!(err, SnagError::SessionNotFound(_)));
+    }
+
+    #[test]
+    fn test_resolve_name_takes_priority() {
+        let mut reg = SessionRegistry::new();
+        // Session with name "abc" but different id
+        reg.insert(make_test_session("xyz789012345", Some("abc")));
+        // Session with id starting with "abc"
+        reg.insert(make_test_session("abc123456789", None));
+
+        // Should resolve to the named session, not the id prefix
+        let resolved = reg.resolve("abc").unwrap();
+        assert_eq!(resolved, "xyz789012345");
+    }
+
+    #[test]
+    fn test_rename() {
+        let mut reg = SessionRegistry::new();
+        reg.insert(make_test_session("abc123", Some("dev")));
+
+        reg.rename("dev", "production".to_string()).unwrap();
+        assert!(reg.resolve("production").is_ok());
+        assert!(reg.resolve("dev").is_err());
+    }
+
+    #[test]
+    fn test_rename_conflict() {
+        let mut reg = SessionRegistry::new();
+        reg.insert(make_test_session("abc123", Some("dev")));
+        reg.insert(make_test_session("xyz789", Some("ci")));
+
+        let err = reg.rename("dev", "ci".to_string()).unwrap_err();
+        assert!(matches!(err, SnagError::SessionNameConflict(_)));
+    }
+
+    #[test]
+    fn test_remove() {
+        let mut reg = SessionRegistry::new();
+        reg.insert(make_test_session("abc123", Some("dev")));
+
+        let removed = reg.remove("abc123");
+        assert!(removed.is_some());
+        assert_eq!(reg.len(), 0);
+        assert!(reg.resolve("dev").is_err());
+    }
+
+    #[test]
+    fn test_has_name() {
+        let mut reg = SessionRegistry::new();
+        reg.insert(make_test_session("abc123", Some("dev")));
+
+        assert!(reg.has_name("dev"));
+        assert!(!reg.has_name("ci"));
+    }
+
+    #[test]
+    fn test_is_empty() {
+        let reg = SessionRegistry::new();
+        assert!(reg.is_empty());
+    }
+}

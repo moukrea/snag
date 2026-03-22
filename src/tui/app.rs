@@ -1,11 +1,20 @@
 use crate::protocol::SessionInfo;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum InputMode {
+    Normal,
+    Rename,
+    Send,
+}
+
 pub struct App {
     pub sessions: Vec<SessionInfo>,
     pub selected: usize,
     pub show_adopted: bool,
     pub should_quit: bool,
     pub preview_lines: Vec<String>,
+    pub input_mode: InputMode,
+    pub input_buffer: String,
 }
 
 impl App {
@@ -16,6 +25,8 @@ impl App {
             show_adopted: false,
             should_quit: false,
             preview_lines: Vec::new(),
+            input_mode: InputMode::Normal,
+            input_buffer: String::new(),
         }
     }
 
@@ -40,5 +51,15 @@ impl App {
 
     pub fn selected_id(&self) -> Option<String> {
         self.selected_session().map(|s| s.id.clone())
+    }
+
+    pub fn enter_input_mode(&mut self, mode: InputMode) {
+        self.input_mode = mode;
+        self.input_buffer.clear();
+    }
+
+    pub fn cancel_input(&mut self) {
+        self.input_mode = InputMode::Normal;
+        self.input_buffer.clear();
     }
 }
