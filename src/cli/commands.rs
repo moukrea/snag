@@ -1,0 +1,520 @@
+use crate::cli::output;
+use crate::client::DaemonClient;
+use crate::config::Config;
+use crate::error::Result;
+use crate::protocol::*;
+
+pub async fn cmd_new(
+    config: &Config,
+    shell: Option<String>,
+    name: Option<String>,
+    cwd: Option<String>,
+) -> Result<()> {
+    let mut client = DaemonClient::connect(config).await?;
+    let resp = client
+        .request(&Request::SessionNew { shell, name, cwd })
+        .await?;
+    match resp {
+        Response::Ok(ResponseData::SessionCreated { id }) => {
+            println!("{id}");
+            Ok(())
+        }
+        Response::Error { message, .. } => {
+            eprintln!("error: {message}");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("unexpected response");
+            std::process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_kill(config: &Config, target: String) -> Result<()> {
+    let mut client = DaemonClient::connect(config).await?;
+    let resp = client.request(&Request::SessionKill { target }).await?;
+    match resp {
+        Response::Ok(_) => Ok(()),
+        Response::Error { message, .. } => {
+            eprintln!("error: {message}");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("unexpected response");
+            std::process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_rename(config: &Config, target: String, new_name: String) -> Result<()> {
+    let mut client = DaemonClient::connect(config).await?;
+    let resp = client
+        .request(&Request::SessionRename { target, new_name })
+        .await?;
+    match resp {
+        Response::Ok(_) => Ok(()),
+        Response::Error { message, .. } => {
+            eprintln!("error: {message}");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("unexpected response");
+            std::process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_list(config: &Config, json: bool, all: bool) -> Result<()> {
+    let mut client = DaemonClient::connect(config).await?;
+    let resp = client.request(&Request::SessionList { all }).await?;
+    match resp {
+        Response::Ok(ResponseData::SessionList(sessions)) => {
+            if json {
+                output::print_session_list_json(&sessions);
+            } else {
+                output::print_session_list(&sessions);
+            }
+            Ok(())
+        }
+        Response::Error { message, .. } => {
+            eprintln!("error: {message}");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("unexpected response");
+            std::process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_info(config: &Config, target: String, json: bool) -> Result<()> {
+    let mut client = DaemonClient::connect(config).await?;
+    let resp = client.request(&Request::SessionInfo { target }).await?;
+    match resp {
+        Response::Ok(ResponseData::SessionInfo(info)) => {
+            if json {
+                output::print_session_info_json(&info);
+            } else {
+                output::print_session_info(&info);
+            }
+            Ok(())
+        }
+        Response::Error { message, .. } => {
+            eprintln!("error: {message}");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("unexpected response");
+            std::process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_attach(config: &Config, target: String, read_only: bool) -> Result<()> {
+    use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+    use crossterm::terminal;
+    use std::io::Write;
+
+    let mut client = DaemonClient::connect(config).await?;
+
+    // Send attach request
+    let resp = client
+        .request(&Request::SessionAttach {
+            target: target.clone(),
+            read_only,
+        })
+        .await?;
+
+    // Print initial scrollback
+    match resp {
+        Response::Ok(ResponseData::Output(scrollback)) => {
+            print!("{scrollback}");
+            std::io::stdout().flush()?;
+        }
+        Response::Error { message, .. } => {
+            eprintln!("error: {message}");
+            std::process::exit(1);
+        }
+        _ => {}
+    }
+
+    // Enter raw mode
+    terminal::enable_raw_mode()?;
+
+    // Send initial terminal size
+    let (cols, rows) = terminal::size().unwrap_or((80, 24));
+    let _ = client.send_resize(cols, rows).await;
+
+    let stream = client.into_stream();
+    let (reader, writer) = stream.into_split();
+    let mut reader = tokio::io::BufReader::new(reader);
+    let mut writer = writer;
+
+    // Track escape sequence for detach (Ctrl+\ double-tap)
+    let detach_timeout = std::time::Duration::from_millis(config.detach_timeout_ms);
+    let mut last_escape: Option<std::time::Instant> = None;
+
+    // Spawn reader task for PTY output
+    let reader_handle = tokio::spawn(async move {
+        loop {
+            match read_frame(&mut reader).await {
+                Ok(Some((msg_type, payload))) => {
+                    if msg_type == MSG_PTY_OUTPUT {
+                        let mut stdout = std::io::stdout();
+                        let _ = stdout.write_all(&payload);
+                        let _ = stdout.flush();
+                    } else if msg_type == MSG_SESSION_EVENT {
+                        // Session exited
+                        break;
+                    } else if msg_type == MSG_OK || msg_type == MSG_ERROR {
+                        // Response to a control message, ignore
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Input loop
+    let result = loop {
+        if let Ok(true) = event::poll(std::time::Duration::from_millis(50)) {
+            match event::read() {
+                Ok(Event::Key(key_event)) => {
+                    // Check for Ctrl+\ (detach sequence)
+                    if key_event.code == KeyCode::Char('\\')
+                        && key_event.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        if let Some(last) = last_escape {
+                            if last.elapsed() < detach_timeout {
+                                // Double-tap detected — detach
+                                break Ok(());
+                            }
+                        }
+                        last_escape = Some(std::time::Instant::now());
+                        continue;
+                    }
+
+                    last_escape = None;
+
+                    if read_only {
+                        continue;
+                    }
+
+                    // Convert key event to bytes
+                    let bytes = key_event_to_bytes(&key_event);
+                    if !bytes.is_empty() {
+                        let req = Request::PtyInput(bytes);
+                        let frame = match encode_request(&req) {
+                            Ok(f) => f,
+                            Err(e) => break Err(e),
+                        };
+                        if let Err(e) =
+                            tokio::io::AsyncWriteExt::write_all(&mut writer, &frame).await
+                        {
+                            break Err(e.into());
+                        }
+                    }
+                }
+                Ok(Event::Resize(cols, rows)) => {
+                    let req = Request::Resize { cols, rows };
+                    let frame = match encode_request(&req) {
+                        Ok(f) => f,
+                        Err(e) => break Err(e),
+                    };
+                    let _ = tokio::io::AsyncWriteExt::write_all(&mut writer, &frame).await;
+                }
+                _ => {}
+            }
+        }
+
+        // Check if reader task finished (session exited)
+        if reader_handle.is_finished() {
+            break Ok(());
+        }
+    };
+
+    // Send detach
+    let detach_req = Request::SessionDetach;
+    if let Ok(frame) = encode_request(&detach_req) {
+        let _ = tokio::io::AsyncWriteExt::write_all(&mut writer, &frame).await;
+    }
+
+    // Restore terminal
+    terminal::disable_raw_mode()?;
+    println!();
+
+    result
+}
+
+fn key_event_to_bytes(event: &crossterm::event::KeyEvent) -> Vec<u8> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
+
+    match event.code {
+        KeyCode::Char(c) => {
+            if ctrl {
+                // Ctrl+A=1, Ctrl+B=2, ..., Ctrl+Z=26
+                let byte = (c.to_ascii_lowercase() as u8)
+                    .wrapping_sub(b'a')
+                    .wrapping_add(1);
+                if byte <= 26 {
+                    vec![byte]
+                } else {
+                    vec![]
+                }
+            } else {
+                let mut buf = [0u8; 4];
+                let s = c.encode_utf8(&mut buf);
+                s.as_bytes().to_vec()
+            }
+        }
+        KeyCode::Enter => vec![b'\r'],
+        KeyCode::Backspace => vec![0x7f],
+        KeyCode::Tab => vec![b'\t'],
+        KeyCode::Esc => vec![0x1b],
+        KeyCode::Up => b"\x1b[A".to_vec(),
+        KeyCode::Down => b"\x1b[B".to_vec(),
+        KeyCode::Right => b"\x1b[C".to_vec(),
+        KeyCode::Left => b"\x1b[D".to_vec(),
+        KeyCode::Home => b"\x1b[H".to_vec(),
+        KeyCode::End => b"\x1b[F".to_vec(),
+        KeyCode::PageUp => b"\x1b[5~".to_vec(),
+        KeyCode::PageDown => b"\x1b[6~".to_vec(),
+        KeyCode::Delete => b"\x1b[3~".to_vec(),
+        KeyCode::Insert => b"\x1b[2~".to_vec(),
+        KeyCode::F(n) => match n {
+            1 => b"\x1bOP".to_vec(),
+            2 => b"\x1bOQ".to_vec(),
+            3 => b"\x1bOR".to_vec(),
+            4 => b"\x1bOS".to_vec(),
+            5 => b"\x1b[15~".to_vec(),
+            6 => b"\x1b[17~".to_vec(),
+            7 => b"\x1b[18~".to_vec(),
+            8 => b"\x1b[19~".to_vec(),
+            9 => b"\x1b[20~".to_vec(),
+            10 => b"\x1b[21~".to_vec(),
+            11 => b"\x1b[23~".to_vec(),
+            12 => b"\x1b[24~".to_vec(),
+            _ => vec![],
+        },
+        _ => vec![],
+    }
+}
+
+pub async fn cmd_send(config: &Config, target: String, command: String) -> Result<()> {
+    let mut client = DaemonClient::connect(config).await?;
+    let resp = client
+        .request(&Request::SessionSend {
+            target,
+            input: command,
+        })
+        .await?;
+    match resp {
+        Response::Ok(_) => Ok(()),
+        Response::Error { message, .. } => {
+            eprintln!("error: {message}");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("unexpected response");
+            std::process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_output(
+    config: &Config,
+    target: String,
+    lines: Option<u32>,
+    follow: bool,
+    json: bool,
+) -> Result<()> {
+    use std::io::Write;
+
+    let mut client = DaemonClient::connect(config).await?;
+    let resp = client
+        .request(&Request::SessionOutput {
+            target: target.clone(),
+            lines,
+            follow,
+        })
+        .await?;
+
+    match resp {
+        Response::Ok(ResponseData::Output(text)) => {
+            if json {
+                let wrapper = serde_json::json!({
+                    "session": target,
+                    "output": text,
+                });
+                println!("{}", serde_json::to_string_pretty(&wrapper).unwrap());
+            } else {
+                print!("{text}");
+                std::io::stdout().flush()?;
+            }
+
+            if follow {
+                // Stream additional output
+                let mut stream = client.into_stream();
+                loop {
+                    match read_frame(&mut stream).await {
+                        Ok(Some((msg_type, payload))) => {
+                            if msg_type == MSG_PTY_OUTPUT {
+                                let mut stdout = std::io::stdout();
+                                let _ = stdout.write_all(&payload);
+                                let _ = stdout.flush();
+                            } else if msg_type == MSG_SESSION_EVENT {
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => break,
+                    }
+                }
+            }
+
+            Ok(())
+        }
+        Response::Error { message, .. } => {
+            eprintln!("error: {message}");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("unexpected response");
+            std::process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_cwd(config: &Config, target: String) -> Result<()> {
+    let mut client = DaemonClient::connect(config).await?;
+    let resp = client.request(&Request::SessionCwd { target }).await?;
+    match resp {
+        Response::Ok(ResponseData::Cwd(cwd)) => {
+            println!("{cwd}");
+            Ok(())
+        }
+        Response::Error { message, .. } => {
+            eprintln!("error: {message}");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("unexpected response");
+            std::process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_ps(config: &Config, target: String) -> Result<()> {
+    let mut client = DaemonClient::connect(config).await?;
+    let resp = client.request(&Request::SessionPs { target }).await?;
+    match resp {
+        Response::Ok(ResponseData::ProcessInfo(entries)) => {
+            output::print_process_list(&entries);
+            Ok(())
+        }
+        Response::Error { message, .. } => {
+            eprintln!("error: {message}");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("unexpected response");
+            std::process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_scan(config: &Config) -> Result<()> {
+    let mut client = DaemonClient::connect(config).await?;
+    let resp = client.request(&Request::SessionScan).await?;
+    match resp {
+        Response::Ok(ResponseData::ScanResult(sessions)) => {
+            output::print_scan_results(&sessions);
+            Ok(())
+        }
+        Response::Error { message, .. } => {
+            eprintln!("error: {message}");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("unexpected response");
+            std::process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_adopt(config: &Config, pts_or_pid: String, name: Option<String>) -> Result<()> {
+    let mut client = DaemonClient::connect(config).await?;
+    let resp = client
+        .request(&Request::SessionAdopt { pts_or_pid, name })
+        .await?;
+    match resp {
+        Response::Ok(ResponseData::SessionCreated { id }) => {
+            println!("{id}");
+            Ok(())
+        }
+        Response::Error { message, .. } => {
+            eprintln!("error: {message}");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("unexpected response");
+            std::process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_daemon_start(config: &Config) -> Result<()> {
+    // Check if already running
+    let socket_path = config.socket_path();
+    if tokio::net::UnixStream::connect(&socket_path).await.is_ok() {
+        eprintln!("daemon is already running");
+        return Ok(());
+    }
+
+    // The daemon runs in this process (foreground)
+    crate::daemon::server::run_daemon(config.clone()).await
+}
+
+pub async fn cmd_daemon_stop(config: &Config) -> Result<()> {
+    let mut client = DaemonClient::connect(config).await?;
+    let resp = client.request(&Request::DaemonStop).await?;
+    match resp {
+        Response::Ok(_) => {
+            println!("daemon stopped");
+            Ok(())
+        }
+        Response::Error { message, .. } => {
+            eprintln!("error: {message}");
+            std::process::exit(1);
+        }
+        _ => Ok(()),
+    }
+}
+
+pub async fn cmd_daemon_status(config: &Config) -> Result<()> {
+    let mut client = DaemonClient::connect(config).await?;
+    let resp = client.request(&Request::DaemonStatus).await?;
+    match resp {
+        Response::Ok(ResponseData::DaemonStatus {
+            pid,
+            uptime_secs,
+            session_count,
+        }) => {
+            println!("PID:       {pid}");
+            println!("Uptime:    {uptime_secs}s");
+            println!("Sessions:  {session_count}");
+            Ok(())
+        }
+        Response::Error { message, .. } => {
+            eprintln!("error: {message}");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("unexpected response");
+            std::process::exit(1);
+        }
+    }
+}

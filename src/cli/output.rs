@@ -1,0 +1,135 @@
+use crate::protocol::{DiscoveredSession, ProcessEntry, SessionInfo};
+
+pub fn print_session_list(sessions: &[SessionInfo]) {
+    if sessions.is_empty() {
+        println!("No sessions.");
+        return;
+    }
+
+    // Calculate column widths
+    let id_width = 8;
+    let name_width = sessions
+        .iter()
+        .map(|s| s.name.as_deref().unwrap_or("-").len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let shell_width = sessions
+        .iter()
+        .map(|s| short_shell(&s.shell).len())
+        .max()
+        .unwrap_or(5)
+        .max(5);
+
+    println!(
+        "{:<id_w$}  {:<name_w$}  {:<shell_w$}  {:<10}  {:<30}  FG PROCESS",
+        "ID",
+        "NAME",
+        "SHELL",
+        "STATE",
+        "CWD",
+        id_w = id_width,
+        name_w = name_width,
+        shell_w = shell_width,
+    );
+
+    for s in sessions {
+        let id_short = if s.id.len() > id_width {
+            &s.id[..id_width]
+        } else {
+            &s.id
+        };
+        let name = s.name.as_deref().unwrap_or("-");
+        let cwd = shorten_path(&s.cwd, 30);
+        let fg = s.fg_process.as_deref().unwrap_or("idle");
+
+        println!(
+            "{:<id_w$}  {:<name_w$}  {:<shell_w$}  {:<10}  {:<30}  {}",
+            id_short,
+            name,
+            short_shell(&s.shell),
+            s.state,
+            cwd,
+            fg,
+            id_w = id_width,
+            name_w = name_width,
+            shell_w = shell_width,
+        );
+    }
+}
+
+pub fn print_session_list_json(sessions: &[SessionInfo]) {
+    let wrapper = serde_json::json!({ "sessions": sessions });
+    println!("{}", serde_json::to_string_pretty(&wrapper).unwrap());
+}
+
+pub fn print_session_info(info: &SessionInfo) {
+    println!("ID:           {}", info.id);
+    println!("Name:         {}", info.name.as_deref().unwrap_or("(none)"));
+    println!("Shell:        {}", info.shell);
+    println!("CWD:          {}", info.cwd);
+    println!("State:        {}", info.state);
+    println!(
+        "FG Process:   {}",
+        info.fg_process.as_deref().unwrap_or("idle")
+    );
+    println!("Attached:     {}", info.attached);
+    println!("Adopted:      {}", info.adopted);
+    println!("Created:      {}", info.created_at);
+}
+
+pub fn print_session_info_json(info: &SessionInfo) {
+    println!("{}", serde_json::to_string_pretty(info).unwrap());
+}
+
+pub fn print_scan_results(sessions: &[DiscoveredSession]) {
+    if sessions.is_empty() {
+        println!("No adoptable PTY sessions found.");
+        return;
+    }
+
+    println!(
+        "{:<16}  {:<8}  {:<8}  {:<12}  CWD",
+        "PTS", "HOLDER", "SHELL", "COMMAND"
+    );
+    for s in sessions {
+        let shell_pid = s
+            .shell_pid
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "{:<16}  {:<8}  {:<8}  {:<12}  {}",
+            s.pts, s.holder_pid, shell_pid, s.command, s.cwd,
+        );
+    }
+}
+
+pub fn print_process_list(entries: &[ProcessEntry]) {
+    if entries.is_empty() {
+        println!("No foreground processes.");
+        return;
+    }
+    for e in entries {
+        println!("{:>8}  {}", e.pid, e.command);
+    }
+}
+
+fn short_shell(shell: &str) -> &str {
+    shell.rsplit('/').next().unwrap_or(shell)
+}
+
+fn shorten_path(path: &str, max_len: usize) -> String {
+    if let Ok(home) = std::env::var("HOME") {
+        if let Some(rest) = path.strip_prefix(&home) {
+            let shortened = format!("~{rest}");
+            if shortened.len() <= max_len {
+                return shortened;
+            }
+        }
+    }
+    if path.len() <= max_len {
+        path.to_string()
+    } else {
+        format!("...{}", &path[path.len() - max_len + 3..])
+    }
+}

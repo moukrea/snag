@@ -1,0 +1,20 @@
+# Maintainer: moukrea <contact@moukrea.dev>
+pkgname=snag-bin
+pkgver=VERSION_PLACEHOLDER
+pkgrel=1
+pkgdesc="Local PTY session multiplexer — spawn, discover, attach to, and interact with any shell session"
+arch=('x86_64' 'aarch64')
+url="https://github.com/moukrea/snag"
+license=('MIT')
+provides=('snag')
+conflicts=('snag')
+
+source_x86_64=("${url}/releases/download/${pkgver}/snag-${pkgver}-linux-x86_64.tar.gz")
+source_aarch64=("${url}/releases/download/${pkgver}/snag-${pkgver}-linux-aarch64.tar.gz")
+sha256sums_x86_64=('SHA256_X86_64_PLACEHOLDER')
+sha256sums_aarch64=('SHA256_AARCH64_PLACEHOLDER')
+
+package() {
+    install -Dm755 snag "${pkgdir}/usr/bin/snag"
+    install -Dm644 <(curl -sL "${url}/raw/refs/heads/main/LICENSE") "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}
