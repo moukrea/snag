@@ -388,11 +388,15 @@ async fn handle_session_new(
 }
 
 async fn pty_read_loop(session_id: String, master_fd: i32, event_tx: mpsc::Sender<DaemonEvent>) {
-    use std::os::fd::BorrowedFd;
-    use tokio::io::unix::AsyncFd;
+    // Set fd to non-blocking for use with AsyncFd
+    unsafe {
+        let flags = nix::libc::fcntl(master_fd, nix::libc::F_GETFL);
+        nix::libc::fcntl(master_fd, nix::libc::F_SETFL, flags | nix::libc::O_NONBLOCK);
+    }
 
-    let fd = unsafe { BorrowedFd::borrow_raw(master_fd) };
-    let Ok(async_fd) = AsyncFd::new(fd) else {
+    let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(master_fd) };
+    let Ok(async_fd) = tokio::io::unix::AsyncFd::new(fd) else {
+        eprintln!("snagd: failed to create AsyncFd for session {session_id}");
         return;
     };
 
@@ -400,13 +404,20 @@ async fn pty_read_loop(session_id: String, master_fd: i32, event_tx: mpsc::Sende
     loop {
         let mut ready = match async_fd.readable().await {
             Ok(r) => r,
-            Err(_) => break,
+            Err(e) => {
+                eprintln!("snagd: readable error for session {session_id}: {e}");
+                break;
+            }
         };
 
         match ready.try_io(|inner| {
-            let n = nix::unistd::read(inner.as_raw_fd(), &mut buf)
-                .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
-            Ok(n)
+            let ret =
+                unsafe { nix::libc::read(inner.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+            if ret < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(ret as usize)
+            }
         }) {
             Ok(Ok(0)) => {
                 let _ = event_tx.send(DaemonEvent::PtyEof(session_id)).await;
@@ -417,8 +428,14 @@ async fn pty_read_loop(session_id: String, master_fd: i32, event_tx: mpsc::Sende
                     .send(DaemonEvent::PtyData(session_id.clone(), buf[..n].to_vec()))
                     .await;
             }
-            Ok(Err(_)) => {
-                let _ = event_tx.send(DaemonEvent::PtyEof(session_id)).await;
+            Ok(Err(e)) => {
+                // EIO is expected when the child exits
+                if e.raw_os_error() == Some(nix::libc::EIO) {
+                    let _ = event_tx.send(DaemonEvent::PtyEof(session_id)).await;
+                } else {
+                    eprintln!("snagd: read error for session {session_id}: {e}");
+                    let _ = event_tx.send(DaemonEvent::PtyEof(session_id)).await;
+                }
                 break;
             }
             Err(_would_block) => continue,
