@@ -468,9 +468,7 @@ pub async fn cmd_adopt(config: &Config, pts_or_pid: String, name: Option<String>
 
 pub async fn cmd_release(config: &Config, target: String) -> Result<()> {
     let mut client = DaemonClient::connect(config).await?;
-    let resp = client
-        .request(&Request::SessionRelease { target })
-        .await?;
+    let resp = client.request(&Request::SessionRelease { target }).await?;
     match resp {
         Response::Ok(_) => {
             eprintln!("session released");
