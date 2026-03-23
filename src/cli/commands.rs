@@ -176,7 +176,9 @@ pub async fn cmd_attach(config: &Config, target: String, read_only: bool) -> Res
                 match frame {
                     Ok(Some((msg_type, payload))) => {
                         if msg_type == MSG_PTY_OUTPUT {
-                            let _ = std::io::Write::write_all(&mut tty_out, &payload);
+                            // In raw mode, \n must be \r\n for proper display
+                            let fixed = fix_newlines(&payload);
+                            let _ = std::io::Write::write_all(&mut tty_out, &fixed);
                             let _ = std::io::Write::flush(&mut tty_out);
                         } else if msg_type == MSG_SESSION_EVENT {
                             break Ok(());
@@ -245,6 +247,18 @@ pub async fn cmd_attach(config: &Config, target: String, read_only: bool) -> Res
     println!();
 
     result
+}
+
+/// Convert bare \n to \r\n for raw mode terminal display.
+fn fix_newlines(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len());
+    for (i, &b) in data.iter().enumerate() {
+        if b == b'\n' && (i == 0 || data[i - 1] != b'\r') {
+            out.push(b'\r');
+        }
+        out.push(b);
+    }
+    out
 }
 
 fn key_event_to_bytes(event: &crossterm::event::KeyEvent) -> Vec<u8> {
