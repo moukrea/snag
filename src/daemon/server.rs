@@ -314,7 +314,7 @@ async fn handle_request(
         Request::SessionCwd { target } => handle_session_cwd(registry, &target),
         Request::SessionPs { target } => handle_session_ps(registry, &target),
         Request::SessionScan => handle_session_scan(),
-        Request::SessionGrep { pattern } => handle_session_grep(registry, &pattern),
+        Request::SessionGrep { pattern } => handle_session_grep(registry, &pattern).await,
         Request::SessionAdopt { pts_or_pid, name } => {
             handle_session_adopt(registry, &pts_or_pid, name, scrollback_bytes, event_tx).await
         }
@@ -744,7 +744,7 @@ fn handle_session_scan() -> Response {
     }
 }
 
-fn handle_session_grep(registry: &SessionRegistry, pattern: &str) -> Response {
+async fn handle_session_grep(registry: &SessionRegistry, pattern: &str) -> Response {
     let pattern_lower = pattern.to_lowercase();
     let mut matches = Vec::new();
 
@@ -785,7 +785,17 @@ fn handle_session_grep(registry: &SessionRegistry, pattern: &str) -> Response {
             if managed_pts.contains(&session.pts) {
                 continue;
             }
-            if let Some(content) = probe_session_history(session) {
+            // Skip shells that are actively running (R state) — probing them
+            // via gdb could interfere. Shells in S (sleeping) state are safe:
+            // either waiting for input or waiting for a child process.
+            let (shell_pid, _) = match find_shell(session.shell_pid.unwrap_or(0)) {
+                Some(s) => s,
+                None => continue,
+            };
+            if !is_process_sleeping(shell_pid) {
+                continue;
+            }
+            if let Some(content) = probe_session_history(session).await {
                 let matching_lines: Vec<String> = content
                     .lines()
                     .filter(|line| {
@@ -814,52 +824,55 @@ fn handle_session_grep(registry: &SessionRegistry, pattern: &str) -> Response {
     Response::Ok(ResponseData::GrepResult(matches))
 }
 
-/// Probe a non-managed session by briefly stealing the master fd,
-/// injecting `history` to a temp file, reading it, and cleaning up.
-/// The fd is dropped immediately — the session is NOT adopted.
-fn probe_session_history(session: &crate::protocol::DiscoveredSession) -> Option<String> {
-    // Find the actual shell (may need to walk up from foreground process)
-    let shell_pid = session.shell_pid?;
-    let shell_name = find_shell_name(shell_pid)?;
-
-    // Steal the master fd temporarily
-    let master_fd = adopt::adopt_pty(session.holder_pid, session.holder_fd).ok()?;
+/// Probe a non-managed session's shell history using gdb to call write_history()
+/// directly in the shell process. No PTY interaction — completely invisible.
+/// Falls back to reading the on-disk history file if gdb is unavailable.
+async fn probe_session_history(session: &crate::protocol::DiscoveredSession) -> Option<String> {
+    let initial_pid = session.shell_pid?;
+    let (shell_pid, shell_name) = find_shell(initial_pid)?;
 
     // Create temp file path
     let mut rand_bytes = [0u8; 4];
     getrandom::getrandom(&mut rand_bytes).ok()?;
-    let rand_hex = hex::encode(rand_bytes);
-    let tmp_path = format!("/tmp/.snag-probe-{rand_hex}");
+    let tmp_path = format!("/tmp/.snag-probe-{}", hex::encode(rand_bytes));
 
-    // Inject history dump command (Ctrl+U clears current input)
-    let cmd = match shell_name.as_str() {
-        "bash" => format!("\x15 HISTTIMEFORMAT= history > '{tmp_path}' 2>/dev/null\n"),
-        "zsh" => format!("\x15 fc -l 1 > '{tmp_path}' 2>/dev/null\n"),
+    // Use gdb to call bash/zsh's internal history-write function via ptrace.
+    // This produces ZERO terminal output — the shell doesn't even know it happened.
+    let gdb_expr = match shell_name.as_str() {
+        "bash" => format!("call (int)write_history(\"{}\")", tmp_path),
+        "zsh" => format!("call (void)savehistfile(\"{}\", 0, 0)", tmp_path),
         _ => return None,
     };
-    // Leading space + HISTCONTROL=ignorespace means command won't be saved to history
-    nix::unistd::write(&master_fd, cmd.as_bytes()).ok()?;
 
-    // Wait for the shell to execute the command
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    let gdb_ok = tokio::process::Command::new("gdb")
+        .args([
+            "--batch-silent",
+            "--nx",
+            "-p",
+            &shell_pid.to_string(),
+            "-ex",
+            &gdb_expr,
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
 
-    // Read the result
-    let content = std::fs::read_to_string(&tmp_path).ok();
-
-    // Clean up: remove temp file via injection and filesystem
-    let cleanup = format!("\x15 rm -f '{tmp_path}' 2>/dev/null\n");
-    let _ = nix::unistd::write(&master_fd, cleanup.as_bytes());
+    let content = if gdb_ok {
+        std::fs::read_to_string(&tmp_path).ok()
+    } else {
+        // Fallback: read the on-disk history file (may miss unflushed entries)
+        read_history_file(shell_pid, &shell_name)
+    };
     let _ = std::fs::remove_file(&tmp_path);
 
-    // Drop master_fd — session is NOT adopted, terminal emulator keeps control
-    drop(master_fd);
-
-    // Strip line numbers from history output (bash: "  123  command", zsh: "  123  command")
+    // Strip line numbers from history output ("  123  command" -> "command")
     content.map(|c| {
         c.lines()
             .map(|line| {
                 let trimmed = line.trim_start();
-                // Skip the leading number and whitespace
                 if let Some(pos) = trimmed.find(|c: char| !c.is_ascii_digit()) {
                     trimmed[pos..].trim_start().to_string()
                 } else {
@@ -871,13 +884,12 @@ fn probe_session_history(session: &crate::protocol::DiscoveredSession) -> Option
     })
 }
 
-/// Find the shell name for a PID, walking up the parent chain if needed.
-fn find_shell_name(pid: u32) -> Option<String> {
+/// Find the shell PID and name, walking up the parent chain if needed.
+fn find_shell(pid: u32) -> Option<(u32, String)> {
     let comm = pty::read_comm(pid)?;
     if matches!(comm.as_str(), "bash" | "zsh") {
-        return Some(comm);
+        return Some((pid, comm));
     }
-    // Walk parent chain
     let mut cur = pid;
     for _ in 0..10 {
         let stat = std::fs::read_to_string(format!("/proc/{cur}/stat")).ok()?;
@@ -890,12 +902,42 @@ fn find_shell_name(pid: u32) -> Option<String> {
         }
         if let Some(c) = pty::read_comm(ppid) {
             if matches!(c.as_str(), "bash" | "zsh") {
-                return Some(c);
+                return Some((ppid, c));
             }
         }
         cur = ppid;
     }
     None
+}
+
+/// Check if a process is in sleeping state (safe to probe via gdb).
+/// S = interruptible sleep (waiting for input, child, I/O) — safe.
+/// R = running — skip, could be mid-execution.
+fn is_process_sleeping(pid: u32) -> bool {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    stat.rfind(')')
+        .and_then(|i| stat[i + 2..].chars().next())
+        .map(|state| state == 'S')
+        .unwrap_or(false)
+}
+
+/// Fallback: read the on-disk history file (may miss unflushed entries).
+fn read_history_file(shell_pid: u32, shell_name: &str) -> Option<String> {
+    let environ = std::fs::read(format!("/proc/{shell_pid}/environ")).ok()?;
+    let env_entries: Vec<&str> = environ
+        .split(|&b| b == 0)
+        .filter_map(|entry| std::str::from_utf8(entry).ok())
+        .collect();
+    let home = env_entries.iter().find_map(|e| e.strip_prefix("HOME="))?;
+    let histfile = env_entries
+        .iter()
+        .find_map(|e| e.strip_prefix("HISTFILE="))
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| match shell_name {
+            "zsh" => format!("{home}/.zsh_history"),
+            _ => format!("{home}/.bash_history"),
+        });
+    std::fs::read_to_string(histfile).ok()
 }
 
 /// Strip ANSI escape sequences from text for plain-text searching.
