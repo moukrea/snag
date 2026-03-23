@@ -163,6 +163,12 @@ pub fn adopt_pty(holder_pid: u32, holder_fd: i32) -> Result<OwnedFd> {
     let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, holder_pid as libc::pid_t, 0) };
     if pidfd < 0 {
         let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EPERM) {
+            return Err(SnagError::AdoptionFailed(format!(
+                "permission denied: cannot open pidfd for PID {holder_pid}. \
+                 Ensure kernel.yama.ptrace_scope=0: sudo sysctl kernel.yama.ptrace_scope=0"
+            )));
+        }
         return Err(SnagError::AdoptionFailed(format!(
             "pidfd_open failed for PID {holder_pid}: {err}"
         )));
@@ -177,6 +183,17 @@ pub fn adopt_pty(holder_pid: u32, holder_fd: i32) -> Result<OwnedFd> {
 
     if our_fd < 0 {
         let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EPERM) {
+            let ptrace_scope = std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope")
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            return Err(SnagError::AdoptionFailed(format!(
+                "permission denied: cannot access fd {holder_fd} of PID {holder_pid}. \
+                 kernel.yama.ptrace_scope is currently {ptrace_scope} (needs 0). \
+                 Fix with: sudo sysctl kernel.yama.ptrace_scope=0"
+            )));
+        }
         return Err(SnagError::AdoptionFailed(format!(
             "pidfd_getfd failed for PID {holder_pid} fd {holder_fd}: {err}"
         )));

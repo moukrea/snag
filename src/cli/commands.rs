@@ -466,6 +466,27 @@ pub async fn cmd_adopt(config: &Config, pts_or_pid: String, name: Option<String>
     }
 }
 
+pub async fn cmd_release(config: &Config, target: String) -> Result<()> {
+    let mut client = DaemonClient::connect(config).await?;
+    let resp = client
+        .request(&Request::SessionRelease { target })
+        .await?;
+    match resp {
+        Response::Ok(_) => {
+            eprintln!("session released");
+            Ok(())
+        }
+        Response::Error { message, .. } => {
+            eprintln!("error: {message}");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("unexpected response");
+            std::process::exit(1);
+        }
+    }
+}
+
 pub async fn cmd_daemon_start(config: &Config) -> Result<()> {
     // Check if already running
     let socket_path = config.socket_path();

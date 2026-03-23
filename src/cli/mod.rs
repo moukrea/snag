@@ -111,6 +111,11 @@ pub enum Command {
         #[arg(long)]
         name: Option<String>,
     },
+    /// Release an adopted session (unadopt without killing the shell)
+    Release {
+        /// Session ID or name
+        target: String,
+    },
     /// Manage the daemon
     Daemon {
         #[command(subcommand)]

@@ -316,6 +316,7 @@ async fn handle_request(
         Request::SessionAdopt { pts_or_pid, name } => {
             handle_session_adopt(registry, &pts_or_pid, name, scrollback_bytes, event_tx).await
         }
+        Request::SessionRelease { target } => handle_session_release(registry, &target),
         Request::Resize { cols, rows } => handle_resize(registry, clients, client_id, cols, rows),
         Request::PtyInput(data) => handle_pty_input(registry, clients, client_id, &data),
         Request::DaemonStatus => handle_daemon_status(registry, start_time),
@@ -447,9 +448,42 @@ fn handle_session_kill(registry: &mut SessionRegistry, target: &str) -> Response
     match registry.resolve(target) {
         Ok(id) => {
             if let Some(session) = registry.remove(&id) {
-                if let Some(pid) = session.child_pid {
-                    pty::kill_session(pid);
+                // For adopted sessions, just drop the fd — don't kill the shell.
+                // The shell continues running in the original terminal.
+                if !session.adopted {
+                    if let Some(pid) = session.child_pid {
+                        pty::kill_session(pid);
+                    }
                 }
+                Response::Ok(ResponseData::Empty)
+            } else {
+                Response::Error {
+                    code: 4,
+                    message: format!("session not found: {target}"),
+                }
+            }
+        }
+        Err(e) => Response::Error {
+            code: 4,
+            message: e.to_string(),
+        },
+    }
+}
+
+fn handle_session_release(registry: &mut SessionRegistry, target: &str) -> Response {
+    match registry.resolve(target) {
+        Ok(id) => {
+            if let Some(session) = registry.get(&id) {
+                if !session.adopted {
+                    return Response::Error {
+                        code: 10,
+                        message: "cannot release a spawned session; use 'kill' instead".to_string(),
+                    };
+                }
+            }
+            // Remove from registry — this drops the master fd without killing the shell.
+            // The shell continues running and the original terminal emulator retains control.
+            if registry.remove(&id).is_some() {
                 Response::Ok(ResponseData::Empty)
             } else {
                 Response::Error {
@@ -592,6 +626,16 @@ fn handle_session_output(
     match registry.resolve(target) {
         Ok(id) => {
             if let Some(session) = registry.get_mut(&id) {
+                // Adopted sessions don't capture output (the terminal emulator is the reader)
+                if session.adopted && session.scrollback.is_empty() {
+                    return Response::Error {
+                        code: 9,
+                        message: "output capture is not available for adopted sessions; \
+                                  output is displayed in the original terminal emulator"
+                            .to_string(),
+                    };
+                }
+
                 let output = if let Some(n) = lines {
                     session.scrollback.last_n_lines(n as usize)
                 } else {
@@ -599,6 +643,13 @@ fn handle_session_output(
                 };
 
                 if follow {
+                    if session.adopted {
+                        return Response::Error {
+                            code: 9,
+                            message: "follow mode is not available for adopted sessions"
+                                .to_string(),
+                        };
+                    }
                     // Attach client for follow mode (read-only)
                     session.attached_clients.push(client_id);
                     if let Some(client) = clients.get_mut(&client_id) {
@@ -671,7 +722,7 @@ async fn handle_session_adopt(
     pts_or_pid: &str,
     name: Option<String>,
     scrollback_bytes: usize,
-    event_tx: &mpsc::Sender<DaemonEvent>,
+    _event_tx: &mpsc::Sender<DaemonEvent>,
 ) -> Response {
     // Validate name if provided
     if let Some(ref n) = name {
@@ -729,13 +780,11 @@ async fn handle_session_adopt(
                 scrollback_bytes,
             );
 
-            // Start PTY read loop for adopted session
-            let master_raw = session.raw_fd();
-            let session_id = id.clone();
-            let tx = event_tx.clone();
-            tokio::spawn(async move {
-                pty_read_loop(session_id, master_raw, tx).await;
-            });
+            // NOTE: We intentionally do NOT start a pty_read_loop for adopted sessions.
+            // The original terminal emulator (Konsole, GNOME Terminal, etc.) must remain
+            // the sole reader of the PTY master fd. If we read from it, we compete with
+            // the terminal emulator and cause freezes or output corruption.
+            // The adopted master fd is used write-only (for sending commands via `snag send`).
 
             registry.insert(session);
             Response::Ok(ResponseData::SessionCreated { id })
