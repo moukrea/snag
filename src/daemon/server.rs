@@ -304,7 +304,7 @@ async fn handle_request(
         Request::SessionList => handle_session_list(registry),
         Request::SessionInfo { target } => handle_session_info(registry, &target),
         Request::SessionAttach { target, read_only } => {
-            handle_session_attach(registry, clients, client_id, &target, read_only)
+            handle_session_attach(registry, clients, client_id, &target, read_only, event_tx)
         }
         Request::SessionDetach => handle_session_detach(registry, clients, client_id),
         Request::SessionSend { target, input } => handle_session_send(registry, &target, &input),
@@ -526,6 +526,7 @@ fn handle_session_attach(
     client_id: ClientId,
     target: &str,
     read_only: bool,
+    event_tx: &mpsc::Sender<DaemonEvent>,
 ) -> Response {
     match registry.resolve(target) {
         Ok(id) => {
@@ -535,6 +536,23 @@ fn handle_session_attach(
                 if let Some(client) = clients.get_mut(&client_id) {
                     client.session_id = Some(id.clone());
                     client.read_only = read_only;
+                }
+
+                // For registered sessions, start reading from the master fd
+                // so attached clients see echo, prompt, and ALL terminal output.
+                // This competes with the terminal emulator for reads, but
+                // the attached client needs the full PTY stream.
+                if session.registered && session.capture_abort.is_some() {
+                    // Stop the capture file reader (we're replacing it with master fd reader)
+                    if let Some(abort) = session.capture_abort.take() {
+                        abort.abort();
+                    }
+                    let master_raw = session.raw_fd();
+                    let session_id = id.clone();
+                    let tx = event_tx.clone();
+                    tokio::spawn(async move {
+                        pty_read_loop(session_id, master_raw, tx).await;
+                    });
                 }
 
                 // Send scrollback

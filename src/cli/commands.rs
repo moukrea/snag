@@ -468,16 +468,12 @@ pub fn cmd_hook(shell: &str) -> Result<()> {
         "bash" => {
             print!(
                 r#"_snag_hook() {{
-  if [ -n "$SNAG_SESSION" ]; then
-    # Inside script: set up cleanup trap
-    trap 'snag unregister $SNAG_SESSION 2>/dev/null' EXIT
-    return
-  fi
-
+  [ -n "$SNAG_SESSION" ] && return
   local _snag_result
   _snag_result="$(snag register --pid $$ 2>/dev/null)"
   if [ $? -eq 0 ] && [ -n "$_snag_result" ]; then
     eval "$_snag_result"
+    trap 'snag unregister $SNAG_SESSION 2>/dev/null' EXIT
   fi
 }}
 
@@ -489,15 +485,12 @@ _snag_hook
         "zsh" => {
             print!(
                 r#"_snag_hook() {{
-  if [[ -n "$SNAG_SESSION" ]]; then
-    trap 'snag unregister $SNAG_SESSION 2>/dev/null' EXIT
-    return
-  fi
-
+  [[ -n "$SNAG_SESSION" ]] && return
   local _snag_result
   _snag_result="$(snag register --pid $$ 2>/dev/null)"
   if [[ $? -eq 0 ]] && [[ -n "$_snag_result" ]]; then
     eval "$_snag_result"
+    trap 'snag unregister $SNAG_SESSION 2>/dev/null' EXIT
   fi
 }}
 
@@ -540,10 +533,9 @@ pub async fn cmd_register(config: &Config, pid: Option<u32>, name: Option<String
             // `exec script` replaces the shell; the new bash re-sources .bashrc
             // where the hook sees SNAG_SESSION is set and skips re-registration.
             let escaped_path = capture_path.replace('\'', "'\\''");
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
             println!("export SNAG_SESSION={id}");
             println!("export SNAG_CAPTURE='{escaped_path}'");
-            println!("exec script -qfc {shell} '{escaped_path}'");
+            println!("exec > >(tee -a '{escaped_path}') 2>&1");
             Ok(())
         }
         Response::Error { message, .. } => {
