@@ -10,7 +10,7 @@ fn msg_type_for_request(req: &Request) -> u8 {
         Request::SessionNew { .. } => MSG_SESSION_NEW,
         Request::SessionKill { .. } => MSG_SESSION_KILL,
         Request::SessionRename { .. } => MSG_SESSION_RENAME,
-        Request::SessionList { .. } => MSG_SESSION_LIST,
+        Request::SessionList => MSG_SESSION_LIST,
         Request::SessionInfo { .. } => MSG_SESSION_INFO,
         Request::SessionAttach { .. } => MSG_SESSION_ATTACH,
         Request::SessionDetach => MSG_SESSION_DETACH,
@@ -18,9 +18,8 @@ fn msg_type_for_request(req: &Request) -> u8 {
         Request::SessionOutput { .. } => MSG_SESSION_OUTPUT,
         Request::SessionCwd { .. } => MSG_SESSION_CWD,
         Request::SessionPs { .. } => MSG_SESSION_PS,
-        Request::SessionScan => MSG_SESSION_SCAN,
-        Request::SessionAdopt { .. } => MSG_SESSION_ADOPT,
-        Request::SessionRelease { .. } => MSG_SESSION_RELEASE,
+        Request::SessionRegister { .. } => MSG_SESSION_REGISTER,
+        Request::SessionUnregister { .. } => MSG_SESSION_UNREGISTER,
         Request::SessionGrep { .. } => MSG_SESSION_GREP,
         Request::Resize { .. } => MSG_RESIZE,
         Request::PtyInput(_) => MSG_PTY_INPUT,
@@ -153,37 +152,11 @@ mod tests {
 
     #[test]
     fn test_request_roundtrip_session_list() {
-        let req = Request::SessionList {
-            all: true,
-            discover: false,
-        };
+        let req = Request::SessionList;
         let frame = encode_request(&req).unwrap();
         assert_eq!(frame[0], MSG_SESSION_LIST);
         let decoded = decode_request(frame[0], &frame[5..]).unwrap();
-        match decoded {
-            Request::SessionList { all, discover } => {
-                assert!(all);
-                assert!(!discover);
-            }
-            _ => panic!("wrong request type"),
-        }
-    }
-
-    #[test]
-    fn test_request_roundtrip_session_list_discover() {
-        let req = Request::SessionList {
-            all: false,
-            discover: true,
-        };
-        let frame = encode_request(&req).unwrap();
-        let decoded = decode_request(frame[0], &frame[5..]).unwrap();
-        match decoded {
-            Request::SessionList { all, discover } => {
-                assert!(!all);
-                assert!(discover);
-            }
-            _ => panic!("wrong request type"),
-        }
+        assert!(matches!(decoded, Request::SessionList));
     }
 
     #[test]
@@ -305,18 +278,34 @@ mod tests {
     }
 
     #[test]
-    fn test_request_roundtrip_session_adopt() {
-        let req = Request::SessionAdopt {
-            pts_or_pid: "3".to_string(),
-            name: Some("adopted".to_string()),
+    fn test_request_roundtrip_session_register() {
+        let req = Request::SessionRegister {
+            pts: "/dev/pts/3".to_string(),
+            name: Some("my-shell".to_string()),
         };
         let frame = encode_request(&req).unwrap();
-        assert_eq!(frame[0], MSG_SESSION_ADOPT);
+        assert_eq!(frame[0], MSG_SESSION_REGISTER);
         let decoded = decode_request(frame[0], &frame[5..]).unwrap();
         match decoded {
-            Request::SessionAdopt { pts_or_pid, name } => {
-                assert_eq!(pts_or_pid, "3");
-                assert_eq!(name.as_deref(), Some("adopted"));
+            Request::SessionRegister { pts, name } => {
+                assert_eq!(pts, "/dev/pts/3");
+                assert_eq!(name.as_deref(), Some("my-shell"));
+            }
+            _ => panic!("wrong request type"),
+        }
+    }
+
+    #[test]
+    fn test_request_roundtrip_session_unregister() {
+        let req = Request::SessionUnregister {
+            target: "foo".to_string(),
+        };
+        let frame = encode_request(&req).unwrap();
+        assert_eq!(frame[0], MSG_SESSION_UNREGISTER);
+        let decoded = decode_request(frame[0], &frame[5..]).unwrap();
+        match decoded {
+            Request::SessionUnregister { target } => {
+                assert_eq!(target, "foo");
             }
             _ => panic!("wrong request type"),
         }
@@ -332,22 +321,6 @@ mod tests {
         let decoded = decode_request(frame[0], &frame[5..]).unwrap();
         match decoded {
             Request::SessionGrep { pattern } => assert_eq!(pattern, "Hello"),
-            _ => panic!("wrong request type"),
-        }
-    }
-
-    #[test]
-    fn test_request_roundtrip_session_release() {
-        let req = Request::SessionRelease {
-            target: "foo".to_string(),
-        };
-        let frame = encode_request(&req).unwrap();
-        assert_eq!(frame[0], MSG_SESSION_RELEASE);
-        let decoded = decode_request(frame[0], &frame[5..]).unwrap();
-        match decoded {
-            Request::SessionRelease { target } => {
-                assert_eq!(target, "foo");
-            }
             _ => panic!("wrong request type"),
         }
     }
@@ -369,6 +342,23 @@ mod tests {
     }
 
     #[test]
+    fn test_response_roundtrip_ok_session_registered() {
+        let resp = Response::Ok(ResponseData::SessionRegistered {
+            id: "abc123".to_string(),
+            capture_path: "/run/user/1000/snag/capture-abc123".to_string(),
+        });
+        let frame = encode_response(&resp).unwrap();
+        let decoded = decode_response(frame[0], &frame[5..]).unwrap();
+        match decoded {
+            Response::Ok(ResponseData::SessionRegistered { id, capture_path }) => {
+                assert_eq!(id, "abc123");
+                assert_eq!(capture_path, "/run/user/1000/snag/capture-abc123");
+            }
+            _ => panic!("wrong response type"),
+        }
+    }
+
+    #[test]
     fn test_response_roundtrip_ok_session_list() {
         let resp = Response::Ok(ResponseData::SessionList(vec![SessionInfo {
             id: "abc123".to_string(),
@@ -378,7 +368,7 @@ mod tests {
             state: "running".to_string(),
             fg_process: Some("cargo".to_string()),
             attached: 1,
-            adopted: false,
+            registered: false,
             created_at: "2026-03-22T10:00:00Z".to_string(),
         }]));
         let frame = encode_response(&resp).unwrap();

@@ -29,7 +29,7 @@ pub struct Session {
     pub created_at_utc: String,
     pub scrollback: RingBuffer,
     pub attached_clients: Vec<ClientId>,
-    pub adopted: bool,
+    pub registered: bool,
     pub capture_path: Option<PathBuf>,
     pub capture_abort: Option<tokio::task::AbortHandle>,
 }
@@ -56,14 +56,14 @@ impl Session {
             created_at_utc: chrono_now(),
             scrollback: RingBuffer::new(scrollback_bytes),
             attached_clients: Vec::new(),
-            adopted: false,
+            registered: false,
             capture_path: None,
             capture_abort: None,
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn new_adopted(
+    pub fn new_registered(
         id: SessionId,
         name: Option<String>,
         master_fd: OwnedFd,
@@ -85,7 +85,7 @@ impl Session {
             created_at_utc: chrono_now(),
             scrollback: RingBuffer::new(scrollback_bytes),
             attached_clients: Vec::new(),
-            adopted: true,
+            registered: true,
             capture_path,
             capture_abort: None,
         }
@@ -125,7 +125,7 @@ impl Session {
             },
             fg_process,
             attached: self.attached_clients.len(),
-            adopted: self.adopted,
+            registered: self.registered,
             created_at: self.created_at_utc.clone(),
         }
     }
@@ -235,7 +235,7 @@ mod tests {
         assert!(validate_session_name("foo:bar").is_err());
         assert!(validate_session_name("foo@bar").is_err());
         assert!(validate_session_name("foo#bar").is_err());
-        assert!(validate_session_name("café").is_err());
+        assert!(validate_session_name("caf\u{e9}").is_err());
     }
 
     #[test]

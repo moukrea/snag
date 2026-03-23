@@ -9,7 +9,6 @@ pub struct Config {
     pub socket: Option<PathBuf>,
     pub detach_key: String,
     pub detach_timeout_ms: u64,
-    pub show_adopted: bool,
     pub daemon_grace_period: u64,
 }
 
@@ -21,7 +20,6 @@ impl Default for Config {
             socket: None,
             detach_key: "ctrl-\\".to_string(),
             detach_timeout_ms: 500,
-            show_adopted: false,
             daemon_grace_period: 30,
         }
     }
@@ -88,7 +86,6 @@ mod tests {
         assert!(config.socket.is_none());
         assert_eq!(config.detach_key, "ctrl-\\");
         assert_eq!(config.detach_timeout_ms, 500);
-        assert!(!config.show_adopted);
         assert_eq!(config.daemon_grace_period, 30);
     }
 
@@ -99,7 +96,6 @@ shell = "/bin/zsh"
 scrollback_bytes = 2097152
 detach_key = "ctrl-q"
 detach_timeout_ms = 300
-show_adopted = true
 daemon_grace_period = 60
 "#;
         let config: Config = toml::from_str(toml).unwrap();
@@ -107,7 +103,6 @@ daemon_grace_period = 60
         assert_eq!(config.scrollback_bytes, 2097152);
         assert_eq!(config.detach_key, "ctrl-q");
         assert_eq!(config.detach_timeout_ms, 300);
-        assert!(config.show_adopted);
         assert_eq!(config.daemon_grace_period, 60);
     }
 
@@ -121,7 +116,6 @@ shell = "/bin/bash"
         // Other fields should be defaults
         assert_eq!(config.scrollback_bytes, 1_048_576);
         assert_eq!(config.detach_timeout_ms, 500);
-        assert!(!config.show_adopted);
     }
 
     #[test]

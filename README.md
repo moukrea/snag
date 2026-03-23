@@ -1,5 +1,5 @@
 <p align="center">
-  <strong>Spawn, discover, attach to, and interact with any shell session on your machine.</strong>
+  <strong>Spawn, attach to, and interact with any shell session on your machine.</strong>
 </p>
 
 <p align="center">
@@ -14,19 +14,19 @@
 
 ## What is snag?
 
-snag is a local PTY session multiplexer. You open a shell somewhere. From anywhere else, you snag it — send it commands, read its output, resize it, name it, kill it. You do this from another terminal, from a script, from another tool that shells out to `snag`.
+snag is a local PTY session multiplexer. You open a shell somewhere. From anywhere else, you snag it -- send it commands, read its output, resize it, name it, kill it. You do this from another terminal, from a script, from another tool that shells out to `snag`.
 
-snag is not a terminal emulator. It is not a library. It does not do networking. It is a local PTY multiplexer exposed as a CLI tool — a building block that other projects can depend on the way they depend on `git` or `jq`.
+snag is not a terminal emulator. It is not a library. It does not do networking. It is a local PTY multiplexer exposed as a CLI tool -- a building block that other projects can depend on the way they depend on `git` or `jq`.
 
 ### Why not tmux?
 
 tmux and screen are full terminal multiplexers with their own windowing systems, keybinding layers, configuration languages, and conceptual overhead. They solve a much bigger problem. Snag solves a smaller, sharper one:
 
-- **Named persistent sessions** — spawn a session, close your terminal, reopen, reattach
-- **Programmatic control** — send commands and read output without attaching
-- **Session adoption** — snag any existing shell on your machine
-- **Multi-client attach** — multiple terminals viewing the same session simultaneously
-- **Machine-friendly output** — `--json` for everything
+- **Named persistent sessions** -- spawn a session, close your terminal, reopen, reattach
+- **Programmatic control** -- send commands and read output without attaching
+- **Shell hook integration** -- automatically register existing shell sessions
+- **Multi-client attach** -- multiple terminals viewing the same session simultaneously
+- **Machine-friendly output** -- `--json` for everything
 
 ## Installation
 
@@ -110,9 +110,13 @@ The binary is at `target/release/snag`. Copy it somewhere on your `PATH`.
 
 ### Requirements
 
-- Linux (kernel 5.6+ for session adoption via `pidfd_getfd`)
+- Linux (kernel 5.6+ for shell hook registration via `pidfd_getfd`)
 
 ## Quick Start
+
+There are two ways to use snag: **explicit sessions** and **shell hook integration**.
+
+### Explicit sessions
 
 ```bash
 # 1. Spawn a named session
@@ -134,6 +138,35 @@ snag list
 snag kill dev
 ```
 
+### Shell hook (automatic registration)
+
+Add this to your `.bashrc` or `.zshrc`:
+
+```bash
+eval "$(snag hook bash)"
+```
+
+Or for zsh:
+
+```zsh
+eval "$(snag hook zsh)"
+```
+
+This automatically registers every new shell with the snag daemon. When you open a terminal, the shell is registered and its output is captured. When you close the terminal, the session is unregistered cleanly.
+
+Once registered, you can interact with the shell from anywhere:
+
+```bash
+# List all sessions (spawned and registered)
+snag list
+
+# Search across all session output
+snag grep "error"
+
+# Read output from a registered shell
+snag output <id> --lines 20
+```
+
 ## Commands
 
 ### Session Lifecycle
@@ -144,14 +177,21 @@ snag kill dev
 | `snag kill <id\|name>` | Kill a session |
 | `snag rename <id\|name> <new-name>` | Rename a session |
 
+### Shell Hook Integration
+
+| Command | Description |
+|---------|-------------|
+| `snag hook <shell>` | Print shell hook code (bash, zsh) |
+| `snag register [--name N]` | Register the current shell (called by the hook) |
+| `snag unregister <id>` | Unregister a shell session (called by EXIT trap) |
+
 ### Session Discovery
 
 | Command | Description |
 |---------|-------------|
-| `snag list [--json] [--all]` | List all sessions |
+| `snag list [--json]` | List all managed sessions |
 | `snag info <id\|name> [--json]` | Detailed session information |
-| `snag scan` | Discover existing PTY sessions on the machine |
-| `snag adopt <pts\|pid> [--name N]` | Adopt an existing session |
+| `snag grep <pattern> [--json]` | Search session output for a pattern |
 
 ### Session Interaction
 
@@ -209,28 +249,9 @@ snag kill ci-runner
 snag list --json | jq '.sessions[] | select(.name == "dev") | .cwd'
 ```
 
-## Session Adoption
-
-snag can adopt any existing shell session on your machine:
-
-```bash
-# Discover existing sessions
-snag scan
-#  /dev/pts/3  PID 12345  zsh  ~/project
-
-# Adopt one
-snag adopt 3 --name grabbed
-
-# Now interact with it like any snag session
-snag send grabbed "ls"
-snag attach grabbed
-```
-
-Adoption uses `pidfd_getfd()` (Linux 5.6+) to duplicate the PTY master file descriptor from the process that currently holds it. Once adopted, the session is functionally identical to a snag-spawned session.
-
 ## Configuration
 
-Config file: `~/.config/snag/config.toml` (optional — snag works with zero config)
+Config file: `~/.config/snag/config.toml` (optional -- snag works with zero config)
 
 ```toml
 # Default shell (default: $SHELL or /bin/sh)
@@ -242,9 +263,6 @@ scrollback_bytes = 1048576
 # Detach escape sequence (default: Ctrl+\ double-tap within 500ms)
 detach_key = "ctrl-\\"
 detach_timeout_ms = 500
-
-# Always show adopted sessions in `snag list` (default: false)
-show_adopted = false
 
 # Daemon grace period before auto-exit in seconds (default: 30)
 daemon_grace_period = 30

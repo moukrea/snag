@@ -32,11 +32,7 @@ async fn main() {
         Some(Command::Rename { target, new_name }) => {
             cli::commands::cmd_rename(&config, target, new_name).await
         }
-        Some(Command::List {
-            json,
-            all,
-            discover,
-        }) => cli::commands::cmd_list(&config, json, all, discover).await,
+        Some(Command::List { json }) => cli::commands::cmd_list(&config, json).await,
         Some(Command::Info { target, json }) => {
             cli::commands::cmd_info(&config, target, json).await
         }
@@ -57,11 +53,11 @@ async fn main() {
         Some(Command::Grep { pattern, json }) => {
             cli::commands::cmd_grep(&config, pattern, json).await
         }
-        Some(Command::Scan) => cli::commands::cmd_scan(&config).await,
-        Some(Command::Adopt { pts_or_pid, name }) => {
-            cli::commands::cmd_adopt(&config, pts_or_pid, name).await
+        Some(Command::Hook { shell }) => cli::commands::cmd_hook(&shell),
+        Some(Command::Register { name }) => cli::commands::cmd_register(&config, name).await,
+        Some(Command::Unregister { target }) => {
+            cli::commands::cmd_unregister(&config, target).await
         }
-        Some(Command::Release { target }) => cli::commands::cmd_release(&config, target).await,
         Some(Command::Daemon { action }) => match action {
             DaemonAction::Start => cli::commands::cmd_daemon_start(&config).await,
             DaemonAction::Stop => cli::commands::cmd_daemon_stop(&config).await,

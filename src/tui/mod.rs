@@ -22,7 +22,6 @@ pub async fn run_tui(config: &Config) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new();
-    app.show_adopted = config.show_adopted;
 
     // Initial session load
     refresh_sessions(&mut client, &mut app).await?;
@@ -123,10 +122,6 @@ async fn handle_normal_key(
                 app.enter_input_mode(InputMode::Send);
             }
         }
-        KeyCode::Char('a') => {
-            app.show_adopted = !app.show_adopted;
-            refresh_sessions(client, app).await?;
-        }
         _ => {}
     }
     Ok(())
@@ -195,12 +190,7 @@ async fn refresh_sessions(client: &mut DaemonClient, app: &mut App) -> Result<()
     let config = Config::load();
     *client = DaemonClient::connect(&config).await?;
 
-    let resp = client
-        .request(&Request::SessionList {
-            all: app.show_adopted,
-            discover: false,
-        })
-        .await?;
+    let resp = client.request(&Request::SessionList).await?;
 
     if let Response::Ok(ResponseData::SessionList(sessions)) = resp {
         app.sessions = sessions;

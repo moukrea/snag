@@ -27,7 +27,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             let cwd = shorten_path(&s.cwd, 30);
 
             let marker = if i == app.selected { "▸ " } else { "  " };
-            let adopted_marker = if s.adopted { " [A]" } else { "" };
+            let type_marker = if s.registered { " [R]" } else { "" };
 
             let style = if i == app.selected {
                 Style::default()
@@ -40,7 +40,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             };
 
             ListItem::new(Line::from(vec![Span::styled(
-                format!("{marker}{name:<12} {shell:<6} {cwd:<30} {fg}{adopted_marker}"),
+                format!("{marker}{name:<12} {shell:<6} {cwd:<30} {fg}{type_marker}"),
                 style,
             )]))
         })
@@ -76,20 +76,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     // Status bar
     let status_text = match app.input_mode {
-        InputMode::Normal => {
-            let show_adopted_indicator = if app.show_adopted {
-                "[a]dopted:ON"
-            } else {
-                "[a]dopted:OFF"
-            };
-            format!(" [n]ew [x]kill [r]ename [s]end [Enter]attach {show_adopted_indicator} [q]uit")
-        }
+        InputMode::Normal => " [n]ew [x]kill [r]ename [s]end [Enter]attach [q]uit".to_string(),
         InputMode::Rename => {
-            format!(" Rename: {}█  [Enter]confirm [Esc]cancel", app.input_buffer)
+            format!(" Rename: {}  [Enter]confirm [Esc]cancel", app.input_buffer)
         }
         InputMode::Send => {
             format!(
-                " Send command: {}█  [Enter]confirm [Esc]cancel",
+                " Send command: {}  [Enter]confirm [Esc]cancel",
                 app.input_buffer
             )
         }

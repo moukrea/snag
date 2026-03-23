@@ -8,7 +8,7 @@ use crate::daemon::session::{
 use crate::error::Result;
 use crate::protocol::*;
 use std::collections::HashMap;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::AsyncWriteExt;
@@ -187,7 +187,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
             _ = sigterm.recv() => {
                 eprintln!("snagd: received SIGTERM, shutting down");
                 for session in registry.iter_mut() {
-                    if session.adopted {
+                    if session.registered {
                         teardown_output_capture(session);
                     } else if let Some(pid) = session.child_pid {
                         pty::kill_session(pid);
@@ -299,7 +299,7 @@ async fn handle_request(
         Request::SessionRename { target, new_name } => {
             handle_session_rename(registry, &target, new_name)
         }
-        Request::SessionList { all, discover } => handle_session_list(registry, all, discover),
+        Request::SessionList => handle_session_list(registry),
         Request::SessionInfo { target } => handle_session_info(registry, &target),
         Request::SessionAttach { target, read_only } => {
             handle_session_attach(registry, clients, client_id, &target, read_only)
@@ -313,12 +313,11 @@ async fn handle_request(
         } => handle_session_output(registry, clients, client_id, &target, lines, follow),
         Request::SessionCwd { target } => handle_session_cwd(registry, &target),
         Request::SessionPs { target } => handle_session_ps(registry, &target),
-        Request::SessionScan => handle_session_scan(),
         Request::SessionGrep { pattern } => handle_session_grep(registry, &pattern),
-        Request::SessionAdopt { pts_or_pid, name } => {
-            handle_session_adopt(registry, &pts_or_pid, name, scrollback_bytes, event_tx).await
+        Request::SessionRegister { pts, name } => {
+            handle_session_register(registry, &pts, name, scrollback_bytes, event_tx).await
         }
-        Request::SessionRelease { target } => handle_session_release(registry, &target),
+        Request::SessionUnregister { target } => handle_session_unregister(registry, &target),
         Request::Resize { cols, rows } => handle_resize(registry, clients, client_id, cols, rows),
         Request::PtyInput(data) => handle_pty_input(registry, clients, client_id, &data),
         Request::DaemonStatus => handle_daemon_status(registry, start_time),
@@ -451,53 +450,19 @@ fn handle_session_kill(registry: &mut SessionRegistry, target: &str) -> Response
         Ok(id) => {
             // Teardown capture before removal (needs mutable access to session)
             if let Some(session) = registry.get_mut(&id) {
-                if session.adopted {
+                if session.registered {
                     teardown_output_capture(session);
                 }
             }
 
             if let Some(session) = registry.remove(&id) {
-                // For adopted sessions, just drop the fd — don't kill the shell.
+                // For registered sessions, just drop the fd — don't kill the shell.
                 // The shell continues running in the original terminal.
-                if !session.adopted {
+                if !session.registered {
                     if let Some(pid) = session.child_pid {
                         pty::kill_session(pid);
                     }
                 }
-                Response::Ok(ResponseData::Empty)
-            } else {
-                Response::Error {
-                    code: 4,
-                    message: format!("session not found: {target}"),
-                }
-            }
-        }
-        Err(e) => Response::Error {
-            code: 4,
-            message: e.to_string(),
-        },
-    }
-}
-
-fn handle_session_release(registry: &mut SessionRegistry, target: &str) -> Response {
-    match registry.resolve(target) {
-        Ok(id) => {
-            if let Some(session) = registry.get(&id) {
-                if !session.adopted {
-                    return Response::Error {
-                        code: 10,
-                        message: "cannot release a spawned session; use 'kill' instead".to_string(),
-                    };
-                }
-            }
-
-            // Teardown capture (restores direct tty output in the shell)
-            if let Some(session) = registry.get_mut(&id) {
-                teardown_output_capture(session);
-            }
-
-            // Remove from registry — drops the master fd without killing the shell.
-            if registry.remove(&id).is_some() {
                 Response::Ok(ResponseData::Empty)
             } else {
                 Response::Error {
@@ -533,30 +498,9 @@ fn handle_session_rename(
     }
 }
 
-fn handle_session_list(registry: &SessionRegistry, all: bool, discover: bool) -> Response {
-    let sessions: Vec<_> = registry
-        .iter()
-        .filter(|s| all || !s.adopted)
-        .map(|s| s.to_info())
-        .collect();
-
-    if discover {
-        let managed_pts: std::collections::HashSet<String> = registry
-            .iter()
-            .map(|s| s.pts_path.to_string_lossy().into_owned())
-            .collect();
-        let discovered = adopt::scan_pty_sessions()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|s| !managed_pts.contains(&s.pts))
-            .collect();
-        Response::Ok(ResponseData::SessionListDiscovered {
-            sessions,
-            discovered,
-        })
-    } else {
-        Response::Ok(ResponseData::SessionList(sessions))
-    }
+fn handle_session_list(registry: &SessionRegistry) -> Response {
+    let sessions: Vec<_> = registry.iter().map(|s| s.to_info()).collect();
+    Response::Ok(ResponseData::SessionList(sessions))
 }
 
 fn handle_session_info(registry: &SessionRegistry, target: &str) -> Response {
@@ -657,8 +601,8 @@ fn handle_session_output(
     match registry.resolve(target) {
         Ok(id) => {
             if let Some(session) = registry.get_mut(&id) {
-                // For adopted sessions without capture, warn
-                if session.adopted
+                // For registered sessions without capture, warn
+                if session.registered
                     && session.capture_path.is_none()
                     && session.scrollback.is_empty()
                 {
@@ -677,7 +621,6 @@ fn handle_session_output(
                 };
 
                 if follow {
-                    // Follow mode works for adopted sessions with capture
                     session.attached_clients.push(client_id);
                     if let Some(client) = clients.get_mut(&client_id) {
                         client.session_id = Some(id.clone());
@@ -734,21 +677,11 @@ fn handle_session_ps(registry: &SessionRegistry, target: &str) -> Response {
     }
 }
 
-fn handle_session_scan() -> Response {
-    match adopt::scan_pty_sessions() {
-        Ok(sessions) => Response::Ok(ResponseData::ScanResult(sessions)),
-        Err(e) => Response::Error {
-            code: 7,
-            message: e.to_string(),
-        },
-    }
-}
-
 fn handle_session_grep(registry: &SessionRegistry, pattern: &str) -> Response {
     let pattern_lower = pattern.to_lowercase();
     let mut matches = Vec::new();
 
-    // 1. Search managed sessions' scrollback buffers
+    // Search managed sessions' scrollback buffers
     for session in registry.iter() {
         let raw = session.scrollback.all_bytes();
         if raw.is_empty() {
@@ -774,128 +707,7 @@ fn handle_session_grep(registry: &SessionRegistry, pattern: &str) -> Response {
         }
     }
 
-    // 2. Probe non-managed sessions by injecting `history` command
-    let managed_pts: std::collections::HashSet<String> = registry
-        .iter()
-        .map(|s| s.pts_path.to_string_lossy().into_owned())
-        .collect();
-
-    if let Ok(discovered) = adopt::scan_pty_sessions() {
-        for session in &discovered {
-            if managed_pts.contains(&session.pts) {
-                continue;
-            }
-            if let Some(content) = probe_session_history(session) {
-                let matching_lines: Vec<String> = content
-                    .lines()
-                    .filter(|line| {
-                        let trimmed = line.trim();
-                        !trimmed.is_empty() && trimmed.to_lowercase().contains(&pattern_lower)
-                    })
-                    .map(|l| l.to_string())
-                    .collect();
-
-                if !matching_lines.is_empty() {
-                    let pts_short = session
-                        .pts
-                        .strip_prefix("/dev/")
-                        .unwrap_or(&session.pts)
-                        .to_string();
-                    matches.push(GrepMatch {
-                        session_id: pts_short,
-                        session_name: None,
-                        lines: matching_lines,
-                    });
-                }
-            }
-        }
-    }
-
     Response::Ok(ResponseData::GrepResult(matches))
-}
-
-/// Probe a non-managed session by briefly stealing the master fd,
-/// injecting `history` to a temp file, reading it, and cleaning up.
-/// The fd is dropped immediately — the session is NOT adopted.
-fn probe_session_history(session: &crate::protocol::DiscoveredSession) -> Option<String> {
-    // Find the actual shell (may need to walk up from foreground process)
-    let shell_pid = session.shell_pid?;
-    let shell_name = find_shell_name(shell_pid)?;
-
-    // Steal the master fd temporarily
-    let master_fd = adopt::adopt_pty(session.holder_pid, session.holder_fd).ok()?;
-
-    // Create temp file path
-    let mut rand_bytes = [0u8; 4];
-    getrandom::getrandom(&mut rand_bytes).ok()?;
-    let rand_hex = hex::encode(rand_bytes);
-    let tmp_path = format!("/tmp/.snag-probe-{rand_hex}");
-
-    // Inject history dump command (Ctrl+U clears current input)
-    let cmd = match shell_name.as_str() {
-        "bash" => format!("\x15 HISTTIMEFORMAT= history > '{tmp_path}' 2>/dev/null\n"),
-        "zsh" => format!("\x15 fc -l 1 > '{tmp_path}' 2>/dev/null\n"),
-        _ => return None,
-    };
-    // Leading space + HISTCONTROL=ignorespace means command won't be saved to history
-    nix::unistd::write(&master_fd, cmd.as_bytes()).ok()?;
-
-    // Wait for the shell to execute the command
-    std::thread::sleep(std::time::Duration::from_millis(300));
-
-    // Read the result
-    let content = std::fs::read_to_string(&tmp_path).ok();
-
-    // Clean up: remove temp file via injection and filesystem
-    let cleanup = format!("\x15 rm -f '{tmp_path}' 2>/dev/null\n");
-    let _ = nix::unistd::write(&master_fd, cleanup.as_bytes());
-    let _ = std::fs::remove_file(&tmp_path);
-
-    // Drop master_fd — session is NOT adopted, terminal emulator keeps control
-    drop(master_fd);
-
-    // Strip line numbers from history output (bash: "  123  command", zsh: "  123  command")
-    content.map(|c| {
-        c.lines()
-            .map(|line| {
-                let trimmed = line.trim_start();
-                // Skip the leading number and whitespace
-                if let Some(pos) = trimmed.find(|c: char| !c.is_ascii_digit()) {
-                    trimmed[pos..].trim_start().to_string()
-                } else {
-                    line.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    })
-}
-
-/// Find the shell name for a PID, walking up the parent chain if needed.
-fn find_shell_name(pid: u32) -> Option<String> {
-    let comm = pty::read_comm(pid)?;
-    if matches!(comm.as_str(), "bash" | "zsh") {
-        return Some(comm);
-    }
-    // Walk parent chain
-    let mut cur = pid;
-    for _ in 0..10 {
-        let stat = std::fs::read_to_string(format!("/proc/{cur}/stat")).ok()?;
-        let ppid: u32 = stat
-            .rfind(')')
-            .and_then(|i| stat[i + 2..].split_whitespace().nth(1))
-            .and_then(|s| s.parse().ok())?;
-        if ppid <= 1 {
-            return None;
-        }
-        if let Some(c) = pty::read_comm(ppid) {
-            if matches!(c.as_str(), "bash" | "zsh") {
-                return Some(c);
-            }
-        }
-        cur = ppid;
-    }
-    None
 }
 
 /// Strip ANSI escape sequences from text for plain-text searching.
@@ -939,9 +751,9 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-async fn handle_session_adopt(
+async fn handle_session_register(
     registry: &mut SessionRegistry,
-    pts_or_pid: &str,
+    pts: &str,
     name: Option<String>,
     scrollback_bytes: usize,
     event_tx: &mpsc::Sender<DaemonEvent>,
@@ -962,7 +774,7 @@ async fn handle_session_adopt(
         }
     }
 
-    // Scan to find the target
+    // Scan to find the terminal emulator holding the master fd for this PTS
     let sessions = match adopt::scan_pty_sessions() {
         Ok(s) => s,
         Err(e) => {
@@ -973,33 +785,26 @@ async fn handle_session_adopt(
         }
     };
 
-    // Find matching session by PTS path or PID
-    let target = sessions.into_iter().find(|s| {
-        s.pts.ends_with(&format!("/{pts_or_pid}"))
-            || s.pts == format!("/dev/pts/{pts_or_pid}")
-            || s.holder_pid.to_string() == pts_or_pid
-            || s.shell_pid.map(|p| p.to_string()) == Some(pts_or_pid.to_string())
-    });
+    // Find the session matching the given PTS path
+    let target = sessions.into_iter().find(|s| s.pts == pts);
 
     let Some(discovered) = target else {
         return Response::Error {
             code: 4,
-            message: format!("no adoptable session found for: {pts_or_pid}"),
+            message: format!("no PTY session found for: {pts}"),
         };
     };
 
-    // Adopt the PTY master fd
+    // Steal the master fd via pidfd_getfd
     match adopt::adopt_pty(discovered.holder_pid, discovered.holder_fd) {
         Ok(master_fd) => {
             let id = generate_session_id();
 
-            // NOTE: We do NOT start a pty_read_loop for adopted sessions.
-            // The terminal emulator must remain the sole reader of the PTY master fd.
-            // Instead, we inject a tee command into the shell to duplicate output to a
-            // capture file, which we tail for scrollback/output capture.
-            let capture_path = setup_output_capture(&master_fd, discovered.shell_pid, &id);
+            // Set up capture file (the shell hook will exec tee on the client side,
+            // but we still create the capture file and start reading it)
+            let capture_path = setup_capture_file(&id);
 
-            let session = Session::new_adopted(
+            let session = Session::new_registered(
                 id.clone(),
                 name,
                 master_fd,
@@ -1013,15 +818,24 @@ async fn handle_session_adopt(
             registry.insert(session);
 
             // Start capture file reader if capture was set up
-            if let Some(path) = capture_path {
-                let handle =
-                    tokio::spawn(capture_file_read_loop(path, id.clone(), event_tx.clone()));
+            let capture_path_str = if let Some(ref path) = capture_path {
+                let handle = tokio::spawn(capture_file_read_loop(
+                    path.clone(),
+                    id.clone(),
+                    event_tx.clone(),
+                ));
                 if let Some(s) = registry.get_mut(&id) {
                     s.capture_abort = Some(handle.abort_handle());
                 }
-            }
+                path.to_string_lossy().to_string()
+            } else {
+                String::new()
+            };
 
-            Response::Ok(ResponseData::SessionCreated { id })
+            Response::Ok(ResponseData::SessionRegistered {
+                id,
+                capture_path: capture_path_str,
+            })
         }
         Err(e) => Response::Error {
             code: 8,
@@ -1030,25 +844,44 @@ async fn handle_session_adopt(
     }
 }
 
-/// Set up output capture for an adopted session by injecting a tee command.
-/// Returns the capture file path on success, None if the shell doesn't support it.
-fn setup_output_capture(
-    master_fd: &OwnedFd,
-    shell_pid: Option<u32>,
-    session_id: &str,
-) -> Option<PathBuf> {
-    // Detect shell type
-    let shell_name = shell_pid.and_then(pty::read_comm).unwrap_or_default();
+fn handle_session_unregister(registry: &mut SessionRegistry, target: &str) -> Response {
+    match registry.resolve(target) {
+        Ok(id) => {
+            if let Some(session) = registry.get(&id) {
+                if !session.registered {
+                    return Response::Error {
+                        code: 10,
+                        message: "cannot unregister a spawned session; use 'kill' instead"
+                            .to_string(),
+                    };
+                }
+            }
 
-    if !matches!(shell_name.as_str(), "bash" | "zsh") {
-        eprintln!(
-            "snagd: output capture not available for '{}' (requires bash or zsh)",
-            shell_name
-        );
-        return None;
+            // Teardown capture (no SIGHUP, just cleanup)
+            if let Some(session) = registry.get_mut(&id) {
+                teardown_output_capture(session);
+            }
+
+            // Remove from registry — drops the master fd without killing the shell
+            if registry.remove(&id).is_some() {
+                Response::Ok(ResponseData::Empty)
+            } else {
+                Response::Error {
+                    code: 4,
+                    message: format!("session not found: {target}"),
+                }
+            }
+        }
+        Err(e) => Response::Error {
+            code: 4,
+            message: e.to_string(),
+        },
     }
+}
 
-    // Create capture directory (uses same base as socket path)
+/// Create a capture file for a registered session.
+/// Returns the capture file path. The shell hook will set up `exec > >(tee ...)` itself.
+fn setup_capture_file(session_id: &str) -> Option<PathBuf> {
     let capture_dir = capture_dir();
     if let Err(e) = std::fs::create_dir_all(&capture_dir) {
         eprintln!("snagd: failed to create capture directory: {e}");
@@ -1060,23 +893,13 @@ fn setup_output_capture(
         let _ = std::fs::set_permissions(&capture_dir, std::fs::Permissions::from_mode(0o700));
     }
 
-    // Pre-create capture file so the reader can open it immediately
     let path = capture_dir.join(format!("capture-{session_id}"));
     if let Err(e) = std::fs::File::create(&path) {
         eprintln!("snagd: failed to create capture file: {e}");
         return None;
     }
 
-    // Inject tee command into the shell.
-    // \x15 = Ctrl+U (clear current input line for safety)
-    let cmd = format!("\x15exec > >(tee -a '{}') 2>&1\n", path.display());
-    if nix::unistd::write(master_fd, cmd.as_bytes()).is_err() {
-        eprintln!("snagd: failed to inject capture command");
-        let _ = std::fs::remove_file(&path);
-        return None;
-    }
-
-    eprintln!("snagd: output capture enabled at {}", path.display());
+    eprintln!("snagd: capture file created at {}", path.display());
     Some(path)
 }
 
@@ -1086,7 +909,7 @@ async fn capture_file_read_loop(
     session_id: String,
     event_tx: mpsc::Sender<DaemonEvent>,
 ) {
-    // Give the shell time to execute the tee command
+    // Give the shell time to set up the tee command
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let mut file = match tokio::fs::File::open(&path).await {
@@ -1121,7 +944,7 @@ async fn capture_file_read_loop(
     }
 }
 
-/// Clean up output capture for an adopted session.
+/// Clean up output capture for a registered session.
 fn teardown_output_capture(session: &mut Session) {
     // Abort the capture file reader
     if let Some(abort) = session.capture_abort.take() {

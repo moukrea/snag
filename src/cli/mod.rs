@@ -50,12 +50,6 @@ pub enum Command {
         /// Output as JSON
         #[arg(long)]
         json: bool,
-        /// Include adopted sessions
-        #[arg(long)]
-        all: bool,
-        /// Also discover system PTY sessions available for adoption
-        #[arg(long, short = 'd')]
-        discover: bool,
     },
     /// Show session details
     Info {
@@ -112,19 +106,20 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Scan for adoptable PTY sessions
-    Scan,
-    /// Adopt an existing PTY session
-    Adopt {
-        /// PTS device number or PID
-        pts_or_pid: String,
+    /// Print shell hook code for automatic session registration
+    Hook {
+        /// Shell type (bash or zsh)
+        shell: String,
+    },
+    /// Register the current shell session with the daemon (called by hook)
+    Register {
         /// Session name
         #[arg(long)]
         name: Option<String>,
     },
-    /// Release an adopted session (unadopt without killing the shell)
-    Release {
-        /// Session ID or name
+    /// Unregister a shell session from the daemon (called by EXIT trap)
+    Unregister {
+        /// Session ID
         target: String,
     },
     /// Manage the daemon

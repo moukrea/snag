@@ -1,13 +1,12 @@
-use crate::protocol::{DiscoveredSession, GrepMatch, ProcessEntry, SessionInfo};
+use crate::protocol::{GrepMatch, ProcessEntry, SessionInfo};
 
-pub fn print_session_list(sessions: &[SessionInfo], discovered: &[DiscoveredSession]) {
-    if sessions.is_empty() && discovered.is_empty() {
+pub fn print_session_list(sessions: &[SessionInfo]) {
+    if sessions.is_empty() {
         println!("No sessions.");
-        println!("Hint: use 'snag list -d' to discover system terminal sessions.");
         return;
     }
 
-    // Calculate column widths across both managed and discovered
+    // Calculate column widths
     let id_width = 8;
     let name_width = sessions
         .iter()
@@ -18,7 +17,6 @@ pub fn print_session_list(sessions: &[SessionInfo], discovered: &[DiscoveredSess
     let shell_width = sessions
         .iter()
         .map(|s| short_shell(&s.shell).len())
-        .chain(discovered.iter().map(|s| s.command.len()))
         .max()
         .unwrap_or(5)
         .max(5);
@@ -36,7 +34,6 @@ pub fn print_session_list(sessions: &[SessionInfo], discovered: &[DiscoveredSess
     );
     println!("{header}");
 
-    // Print managed sessions
     for s in sessions {
         let id_short = if s.id.len() > id_width {
             &s.id[..id_width]
@@ -48,8 +45,8 @@ pub fn print_session_list(sessions: &[SessionInfo], discovered: &[DiscoveredSess
         let fg = s.fg_process.as_deref().unwrap_or("idle");
         let status = if s.state.starts_with("exited") {
             &s.state
-        } else if s.adopted {
-            "adopted"
+        } else if s.registered {
+            "registered"
         } else {
             "managed"
         };
@@ -67,49 +64,11 @@ pub fn print_session_list(sessions: &[SessionInfo], discovered: &[DiscoveredSess
             shell_w = shell_width,
         );
     }
-
-    // Print discovered (unmanaged) sessions
-    if !discovered.is_empty() {
-        if !sessions.is_empty() {
-            println!();
-        }
-        println!("--- Available to adopt (snag adopt <ID>) ---");
-        for s in discovered {
-            let pts_short = s.pts.strip_prefix("/dev/").unwrap_or(&s.pts);
-            let cwd = shorten_path(&s.cwd, 30);
-            let fg = if s.command.is_empty() {
-                "-"
-            } else {
-                &s.command
-            };
-
-            println!(
-                "{:<id_w$}  {:<name_w$}  {:<shell_w$}  {:<10}  {:<30}  {}",
-                pts_short,
-                "-",
-                &s.command,
-                "available",
-                cwd,
-                fg,
-                id_w = id_width,
-                name_w = name_width,
-                shell_w = shell_width,
-            );
-        }
-    }
 }
 
-pub fn print_session_list_json(sessions: &[SessionInfo], discovered: &[DiscoveredSession]) {
-    if discovered.is_empty() {
-        let wrapper = serde_json::json!({ "sessions": sessions });
-        println!("{}", serde_json::to_string_pretty(&wrapper).unwrap());
-    } else {
-        let wrapper = serde_json::json!({
-            "sessions": sessions,
-            "discovered": discovered,
-        });
-        println!("{}", serde_json::to_string_pretty(&wrapper).unwrap());
-    }
+pub fn print_session_list_json(sessions: &[SessionInfo]) {
+    let wrapper = serde_json::json!({ "sessions": sessions });
+    println!("{}", serde_json::to_string_pretty(&wrapper).unwrap());
 }
 
 pub fn print_session_info(info: &SessionInfo) {
@@ -123,34 +82,12 @@ pub fn print_session_info(info: &SessionInfo) {
         info.fg_process.as_deref().unwrap_or("idle")
     );
     println!("Attached:     {}", info.attached);
-    println!("Adopted:      {}", info.adopted);
+    println!("Registered:   {}", info.registered);
     println!("Created:      {}", info.created_at);
 }
 
 pub fn print_session_info_json(info: &SessionInfo) {
     println!("{}", serde_json::to_string_pretty(info).unwrap());
-}
-
-pub fn print_scan_results(sessions: &[DiscoveredSession]) {
-    if sessions.is_empty() {
-        println!("No adoptable PTY sessions found.");
-        return;
-    }
-
-    println!(
-        "{:<16}  {:<8}  {:<8}  {:<12}  CWD",
-        "PTS", "HOLDER", "SHELL", "COMMAND"
-    );
-    for s in sessions {
-        let shell_pid = s
-            .shell_pid
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| "-".to_string());
-        println!(
-            "{:<16}  {:<8}  {:<8}  {:<12}  {}",
-            s.pts, s.holder_pid, shell_pid, s.command, s.cwd,
-        );
-    }
 }
 
 pub fn print_grep(matches: &[GrepMatch]) {

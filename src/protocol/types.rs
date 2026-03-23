@@ -11,10 +11,9 @@ pub const MSG_SESSION_SEND: u8 = 0x08;
 pub const MSG_SESSION_OUTPUT: u8 = 0x09;
 pub const MSG_SESSION_CWD: u8 = 0x0A;
 pub const MSG_SESSION_PS: u8 = 0x0B;
-pub const MSG_SESSION_SCAN: u8 = 0x0C;
-pub const MSG_SESSION_ADOPT: u8 = 0x0D;
-pub const MSG_SESSION_RELEASE: u8 = 0x0F;
 pub const MSG_SESSION_GREP: u8 = 0x11;
+pub const MSG_SESSION_REGISTER: u8 = 0x12;
+pub const MSG_SESSION_UNREGISTER: u8 = 0x13;
 pub const MSG_RESIZE: u8 = 0x0E;
 pub const MSG_PTY_INPUT: u8 = 0x10;
 pub const MSG_DAEMON_STATUS: u8 = 0xF0;
@@ -39,11 +38,7 @@ pub enum Request {
         target: String,
         new_name: String,
     },
-    SessionList {
-        all: bool,
-        #[serde(default)]
-        discover: bool,
-    },
+    SessionList,
     SessionInfo {
         target: String,
     },
@@ -67,12 +62,11 @@ pub enum Request {
     SessionPs {
         target: String,
     },
-    SessionScan,
-    SessionAdopt {
-        pts_or_pid: String,
+    SessionRegister {
+        pts: String,
         name: Option<String>,
     },
-    SessionRelease {
+    SessionUnregister {
         target: String,
     },
     SessionGrep {
@@ -100,16 +94,15 @@ pub enum ResponseData {
     SessionCreated {
         id: String,
     },
-    SessionList(Vec<SessionInfo>),
-    SessionListDiscovered {
-        sessions: Vec<SessionInfo>,
-        discovered: Vec<DiscoveredSession>,
+    SessionRegistered {
+        id: String,
+        capture_path: String,
     },
+    SessionList(Vec<SessionInfo>),
     SessionInfo(SessionInfo),
     Output(String),
     Cwd(String),
     ProcessInfo(Vec<ProcessEntry>),
-    ScanResult(Vec<DiscoveredSession>),
     DaemonStatus {
         pid: u32,
         uptime_secs: u64,
@@ -135,7 +128,7 @@ pub struct SessionInfo {
     pub state: String,
     pub fg_process: Option<String>,
     pub attached: usize,
-    pub adopted: bool,
+    pub registered: bool,
     pub created_at: String,
 }
 
@@ -145,7 +138,9 @@ pub struct ProcessEntry {
     pub command: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Internal-only: used by adopt.rs scan, not exposed in the protocol.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DiscoveredSession {
     pub pts: String,
     pub holder_pid: u32,

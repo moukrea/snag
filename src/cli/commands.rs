@@ -64,28 +64,15 @@ pub async fn cmd_rename(config: &Config, target: String, new_name: String) -> Re
     }
 }
 
-pub async fn cmd_list(config: &Config, json: bool, all: bool, discover: bool) -> Result<()> {
+pub async fn cmd_list(config: &Config, json: bool) -> Result<()> {
     let mut client = DaemonClient::connect(config).await?;
-    let resp = client
-        .request(&Request::SessionList { all, discover })
-        .await?;
+    let resp = client.request(&Request::SessionList).await?;
     match resp {
         Response::Ok(ResponseData::SessionList(sessions)) => {
             if json {
-                output::print_session_list_json(&sessions, &[]);
+                output::print_session_list_json(&sessions);
             } else {
-                output::print_session_list(&sessions, &[]);
-            }
-            Ok(())
-        }
-        Response::Ok(ResponseData::SessionListDiscovered {
-            sessions,
-            discovered,
-        }) => {
-            if json {
-                output::print_session_list_json(&sessions, &discovered);
-            } else {
-                output::print_session_list(&sessions, &discovered);
+                output::print_session_list(&sessions);
             }
             Ok(())
         }
@@ -439,25 +426,6 @@ pub async fn cmd_ps(config: &Config, target: String) -> Result<()> {
     }
 }
 
-pub async fn cmd_scan(config: &Config) -> Result<()> {
-    let mut client = DaemonClient::connect(config).await?;
-    let resp = client.request(&Request::SessionScan).await?;
-    match resp {
-        Response::Ok(ResponseData::ScanResult(sessions)) => {
-            output::print_scan_results(&sessions);
-            Ok(())
-        }
-        Response::Error { message, .. } => {
-            eprintln!("error: {message}");
-            std::process::exit(1);
-        }
-        _ => {
-            eprintln!("unexpected response");
-            std::process::exit(1);
-        }
-    }
-}
-
 pub async fn cmd_grep(config: &Config, pattern: String, json: bool) -> Result<()> {
     let mut client = DaemonClient::connect(config).await?;
     let resp = client.request(&Request::SessionGrep { pattern }).await?;
@@ -481,14 +449,75 @@ pub async fn cmd_grep(config: &Config, pattern: String, json: bool) -> Result<()
     }
 }
 
-pub async fn cmd_adopt(config: &Config, pts_or_pid: String, name: Option<String>) -> Result<()> {
+pub fn cmd_hook(shell: &str) -> Result<()> {
+    match shell {
+        "bash" => {
+            print!(
+                r#"_snag_hook() {{
+  # Skip if already registered
+  [ -n "$SNAG_SESSION" ] && return
+
+  # Auto-start daemon if needed (snag register handles this)
+  local _snag_result
+  _snag_result="$(snag register 2>/dev/null)"
+  if [ $? -eq 0 ] && [ -n "$_snag_result" ]; then
+    eval "$_snag_result"
+  fi
+}}
+
+_snag_hook
+"#
+            );
+            Ok(())
+        }
+        "zsh" => {
+            print!(
+                r#"_snag_hook() {{
+  # Skip if already registered
+  [[ -n "$SNAG_SESSION" ]] && return
+
+  # Auto-start daemon if needed (snag register handles this)
+  local _snag_result
+  _snag_result="$(snag register 2>/dev/null)"
+  if [[ $? -eq 0 ]] && [[ -n "$_snag_result" ]]; then
+    eval "$_snag_result"
+  fi
+}}
+
+_snag_hook
+"#
+            );
+            Ok(())
+        }
+        _ => {
+            eprintln!("error: unsupported shell '{shell}' (supported: bash, zsh)");
+            std::process::exit(1);
+        }
+    }
+}
+
+pub async fn cmd_register(config: &Config, name: Option<String>) -> Result<()> {
+    // Determine the current PTS
+    let pts = get_current_pts();
+    let Some(pts) = pts else {
+        eprintln!("error: not running in a terminal");
+        std::process::exit(1);
+    };
+
     let mut client = DaemonClient::connect(config).await?;
     let resp = client
-        .request(&Request::SessionAdopt { pts_or_pid, name })
+        .request(&Request::SessionRegister { pts, name })
         .await?;
     match resp {
-        Response::Ok(ResponseData::SessionCreated { id }) => {
-            println!("{id}");
+        Response::Ok(ResponseData::SessionRegistered { id, capture_path }) => {
+            // Print shell commands for the hook to eval
+            println!("export SNAG_SESSION={id}");
+            println!("export SNAG_CAPTURE={capture_path}");
+            println!(
+                "exec > >(tee -a '{}') 2>&1",
+                capture_path.replace('\'', "'\\''")
+            );
+            println!("trap 'snag unregister {id} 2>/dev/null' EXIT");
             Ok(())
         }
         Response::Error { message, .. } => {
@@ -502,23 +531,32 @@ pub async fn cmd_adopt(config: &Config, pts_or_pid: String, name: Option<String>
     }
 }
 
-pub async fn cmd_release(config: &Config, target: String) -> Result<()> {
+pub async fn cmd_unregister(config: &Config, target: String) -> Result<()> {
     let mut client = DaemonClient::connect(config).await?;
-    let resp = client.request(&Request::SessionRelease { target }).await?;
+    let resp = client
+        .request(&Request::SessionUnregister { target })
+        .await?;
     match resp {
-        Response::Ok(_) => {
-            eprintln!("session released");
+        Response::Ok(_) => Ok(()),
+        Response::Error { message, .. } => {
+            // Silently ignore errors during EXIT trap
+            eprintln!("error: {message}");
             Ok(())
         }
-        Response::Error { message, .. } => {
-            eprintln!("error: {message}");
-            std::process::exit(1);
-        }
-        _ => {
-            eprintln!("unexpected response");
-            std::process::exit(1);
-        }
+        _ => Ok(()),
     }
+}
+
+fn get_current_pts() -> Option<String> {
+    // Read /proc/self/fd/0 symlink to get the TTY
+    std::fs::read_link("/proc/self/fd/0").ok().and_then(|p| {
+        let s = p.to_string_lossy().to_string();
+        if s.starts_with("/dev/pts/") {
+            Some(s)
+        } else {
+            None
+        }
+    })
 }
 
 pub async fn cmd_daemon_start(config: &Config) -> Result<()> {

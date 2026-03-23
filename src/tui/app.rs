@@ -10,7 +10,6 @@ pub enum InputMode {
 pub struct App {
     pub sessions: Vec<SessionInfo>,
     pub selected: usize,
-    pub show_adopted: bool,
     pub should_quit: bool,
     pub preview_lines: Vec<String>,
     pub input_mode: InputMode,
@@ -22,7 +21,6 @@ impl App {
         Self {
             sessions: Vec::new(),
             selected: 0,
-            show_adopted: false,
             should_quit: false,
             preview_lines: Vec::new(),
             input_mode: InputMode::Normal,

@@ -165,7 +165,7 @@ mod tests {
             created_at_utc: "2026-01-01T00:00:00Z".to_string(),
             scrollback: RingBuffer::new(1024),
             attached_clients: Vec::new(),
-            adopted: false,
+            registered: false,
             capture_path: None,
             capture_abort: None,
         }
