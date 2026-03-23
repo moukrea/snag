@@ -710,10 +710,8 @@ pub async fn cmd_register(config: &Config, pid: Option<u32>, name: Option<String
     match resp {
         Response::Ok(ResponseData::SessionRegistered { id, capture_path }) => {
             // Print shell commands for the hook to eval.
-            // Uses `script` instead of `tee` to capture EVERYTHING:
-            // echo, prompt, output, ANSI escapes — the full terminal session.
-            // `exec script` replaces the shell; the new bash re-sources .bashrc
-            // where the hook sees SNAG_SESSION is set and skips re-registration.
+            // `exec snag wrap` replaces the shell with a PTY proxy that
+            // captures ALL terminal output (echo, prompt, ANSI escapes).
             let escaped_path = capture_path.replace('\'', "'\\''");
             println!("export SNAG_SESSION={id}");
             println!("export SNAG_CAPTURE='{escaped_path}'");
