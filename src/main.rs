@@ -54,6 +54,9 @@ async fn main() {
         }) => cli::commands::cmd_output(&config, target, lines, follow, json).await,
         Some(Command::Cwd { target }) => cli::commands::cmd_cwd(&config, target).await,
         Some(Command::Ps { target }) => cli::commands::cmd_ps(&config, target).await,
+        Some(Command::Grep { pattern, json }) => {
+            cli::commands::cmd_grep(&config, pattern, json).await
+        }
         Some(Command::Scan) => cli::commands::cmd_scan(&config).await,
         Some(Command::Adopt { pts_or_pid, name }) => {
             cli::commands::cmd_adopt(&config, pts_or_pid, name).await

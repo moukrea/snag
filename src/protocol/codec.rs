@@ -21,6 +21,7 @@ fn msg_type_for_request(req: &Request) -> u8 {
         Request::SessionScan => MSG_SESSION_SCAN,
         Request::SessionAdopt { .. } => MSG_SESSION_ADOPT,
         Request::SessionRelease { .. } => MSG_SESSION_RELEASE,
+        Request::SessionGrep { .. } => MSG_SESSION_GREP,
         Request::Resize { .. } => MSG_RESIZE,
         Request::PtyInput(_) => MSG_PTY_INPUT,
         Request::DaemonStatus => MSG_DAEMON_STATUS,
@@ -317,6 +318,20 @@ mod tests {
                 assert_eq!(pts_or_pid, "3");
                 assert_eq!(name.as_deref(), Some("adopted"));
             }
+            _ => panic!("wrong request type"),
+        }
+    }
+
+    #[test]
+    fn test_request_roundtrip_session_grep() {
+        let req = Request::SessionGrep {
+            pattern: "Hello".to_string(),
+        };
+        let frame = encode_request(&req).unwrap();
+        assert_eq!(frame[0], MSG_SESSION_GREP);
+        let decoded = decode_request(frame[0], &frame[5..]).unwrap();
+        match decoded {
+            Request::SessionGrep { pattern } => assert_eq!(pattern, "Hello"),
             _ => panic!("wrong request type"),
         }
     }

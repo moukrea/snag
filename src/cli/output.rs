@@ -1,4 +1,4 @@
-use crate::protocol::{DiscoveredSession, ProcessEntry, SessionInfo};
+use crate::protocol::{DiscoveredSession, GrepMatch, ProcessEntry, SessionInfo};
 
 pub fn print_session_list(sessions: &[SessionInfo], discovered: &[DiscoveredSession]) {
     if sessions.is_empty() && discovered.is_empty() {
@@ -151,6 +151,31 @@ pub fn print_scan_results(sessions: &[DiscoveredSession]) {
             s.pts, s.holder_pid, shell_pid, s.command, s.cwd,
         );
     }
+}
+
+pub fn print_grep(matches: &[GrepMatch]) {
+    if matches.is_empty() {
+        println!("No matches.");
+        return;
+    }
+    for (i, m) in matches.iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
+        let label = m
+            .session_name
+            .as_deref()
+            .unwrap_or(&m.session_id[..8.min(m.session_id.len())]);
+        println!("[{label}]");
+        for line in &m.lines {
+            println!("  {line}");
+        }
+    }
+}
+
+pub fn print_grep_json(matches: &[GrepMatch]) {
+    let wrapper = serde_json::json!({ "matches": matches });
+    println!("{}", serde_json::to_string_pretty(&wrapper).unwrap());
 }
 
 pub fn print_process_list(entries: &[ProcessEntry]) {

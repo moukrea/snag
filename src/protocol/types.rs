@@ -14,6 +14,7 @@ pub const MSG_SESSION_PS: u8 = 0x0B;
 pub const MSG_SESSION_SCAN: u8 = 0x0C;
 pub const MSG_SESSION_ADOPT: u8 = 0x0D;
 pub const MSG_SESSION_RELEASE: u8 = 0x0F;
+pub const MSG_SESSION_GREP: u8 = 0x11;
 pub const MSG_RESIZE: u8 = 0x0E;
 pub const MSG_PTY_INPUT: u8 = 0x10;
 pub const MSG_DAEMON_STATUS: u8 = 0xF0;
@@ -74,6 +75,9 @@ pub enum Request {
     SessionRelease {
         target: String,
     },
+    SessionGrep {
+        pattern: String,
+    },
     Resize {
         cols: u16,
         rows: u16,
@@ -111,7 +115,15 @@ pub enum ResponseData {
         uptime_secs: u64,
         session_count: usize,
     },
+    GrepResult(Vec<GrepMatch>),
     Empty,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrepMatch {
+    pub session_id: String,
+    pub session_name: Option<String>,
+    pub lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
