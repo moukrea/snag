@@ -748,6 +748,7 @@ fn handle_session_grep(registry: &SessionRegistry, pattern: &str) -> Response {
     let pattern_lower = pattern.to_lowercase();
     let mut matches = Vec::new();
 
+    // 1. Search managed sessions' scrollback buffers
     for session in registry.iter() {
         let raw = session.scrollback.all_bytes();
         if raw.is_empty() {
@@ -773,7 +774,85 @@ fn handle_session_grep(registry: &SessionRegistry, pattern: &str) -> Response {
         }
     }
 
+    // 2. Search non-managed sessions' shell history files (non-invasive)
+    let managed_pts: std::collections::HashSet<String> = registry
+        .iter()
+        .map(|s| s.pts_path.to_string_lossy().into_owned())
+        .collect();
+
+    if let Ok(discovered) = adopt::scan_pty_sessions() {
+        for session in &discovered {
+            if managed_pts.contains(&session.pts) {
+                continue;
+            }
+            let Some(shell_pid) = session.shell_pid else {
+                continue;
+            };
+            if let Some(history) = read_shell_history(shell_pid, &session.command) {
+                let matching_lines: Vec<String> = history
+                    .lines()
+                    .map(|l| strip_zsh_history_meta(l, &session.command))
+                    .filter(|line| {
+                        let trimmed = line.trim();
+                        !trimmed.is_empty() && trimmed.to_lowercase().contains(&pattern_lower)
+                    })
+                    .map(|l| l.to_string())
+                    .collect();
+
+                if !matching_lines.is_empty() {
+                    let pts_short = session
+                        .pts
+                        .strip_prefix("/dev/")
+                        .unwrap_or(&session.pts)
+                        .to_string();
+                    matches.push(GrepMatch {
+                        session_id: pts_short,
+                        session_name: None,
+                        lines: matching_lines,
+                    });
+                }
+            }
+        }
+    }
+
     Response::Ok(ResponseData::GrepResult(matches))
+}
+
+/// Read a shell's history file by looking up HOME from /proc/<pid>/environ.
+fn read_shell_history(shell_pid: u32, shell_name: &str) -> Option<String> {
+    let environ = std::fs::read(format!("/proc/{shell_pid}/environ")).ok()?;
+    let env_entries: Vec<&str> = environ
+        .split(|&b| b == 0)
+        .filter_map(|entry| std::str::from_utf8(entry).ok())
+        .collect();
+
+    let home = env_entries.iter().find_map(|e| e.strip_prefix("HOME="))?;
+
+    // Respect custom HISTFILE if set
+    let histfile =
+        if let Some(custom) = env_entries.iter().find_map(|e| e.strip_prefix("HISTFILE=")) {
+            custom.to_string()
+        } else {
+            match shell_name {
+                "bash" => format!("{home}/.bash_history"),
+                "zsh" => format!("{home}/.zsh_history"),
+                _ => return None,
+            }
+        };
+
+    std::fs::read_to_string(histfile).ok()
+}
+
+/// Strip zsh extended history metadata prefix (`: timestamp:duration;`)
+fn strip_zsh_history_meta<'a>(line: &'a str, shell: &str) -> &'a str {
+    if shell == "zsh" {
+        if let Some(rest) = line.strip_prefix(": ") {
+            if let Some(pos) = rest.find(';') {
+                return &rest[pos + 1..];
+            }
+        }
+    }
+    line
 }
 
 /// Strip ANSI escape sequences from text for plain-text searching.
