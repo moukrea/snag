@@ -40,6 +40,8 @@ pub enum Request {
     },
     SessionList {
         all: bool,
+        #[serde(default)]
+        discover: bool,
     },
     SessionInfo {
         target: String,
@@ -95,6 +97,10 @@ pub enum ResponseData {
         id: String,
     },
     SessionList(Vec<SessionInfo>),
+    SessionListDiscovered {
+        sessions: Vec<SessionInfo>,
+        discovered: Vec<DiscoveredSession>,
+    },
     SessionInfo(SessionInfo),
     Output(String),
     Cwd(String),

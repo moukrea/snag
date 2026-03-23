@@ -32,7 +32,11 @@ async fn main() {
         Some(Command::Rename { target, new_name }) => {
             cli::commands::cmd_rename(&config, target, new_name).await
         }
-        Some(Command::List { json, all }) => cli::commands::cmd_list(&config, json, all).await,
+        Some(Command::List {
+            json,
+            all,
+            discover,
+        }) => cli::commands::cmd_list(&config, json, all, discover).await,
         Some(Command::Info { target, json }) => {
             cli::commands::cmd_info(&config, target, json).await
         }

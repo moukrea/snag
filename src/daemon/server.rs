@@ -299,7 +299,7 @@ async fn handle_request(
         Request::SessionRename { target, new_name } => {
             handle_session_rename(registry, &target, new_name)
         }
-        Request::SessionList { all } => handle_session_list(registry, all),
+        Request::SessionList { all, discover } => handle_session_list(registry, all, discover),
         Request::SessionInfo { target } => handle_session_info(registry, &target),
         Request::SessionAttach { target, read_only } => {
             handle_session_attach(registry, clients, client_id, &target, read_only)
@@ -532,13 +532,30 @@ fn handle_session_rename(
     }
 }
 
-fn handle_session_list(registry: &SessionRegistry, all: bool) -> Response {
+fn handle_session_list(registry: &SessionRegistry, all: bool, discover: bool) -> Response {
     let sessions: Vec<_> = registry
         .iter()
         .filter(|s| all || !s.adopted)
         .map(|s| s.to_info())
         .collect();
-    Response::Ok(ResponseData::SessionList(sessions))
+
+    if discover {
+        let managed_pts: std::collections::HashSet<String> = registry
+            .iter()
+            .map(|s| s.pts_path.to_string_lossy().into_owned())
+            .collect();
+        let discovered = adopt::scan_pty_sessions()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| !managed_pts.contains(&s.pts))
+            .collect();
+        Response::Ok(ResponseData::SessionListDiscovered {
+            sessions,
+            discovered,
+        })
+    } else {
+        Response::Ok(ResponseData::SessionList(sessions))
+    }
 }
 
 fn handle_session_info(registry: &SessionRegistry, target: &str) -> Response {

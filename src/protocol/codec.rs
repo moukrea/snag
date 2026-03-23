@@ -152,12 +152,35 @@ mod tests {
 
     #[test]
     fn test_request_roundtrip_session_list() {
-        let req = Request::SessionList { all: true };
+        let req = Request::SessionList {
+            all: true,
+            discover: false,
+        };
         let frame = encode_request(&req).unwrap();
         assert_eq!(frame[0], MSG_SESSION_LIST);
         let decoded = decode_request(frame[0], &frame[5..]).unwrap();
         match decoded {
-            Request::SessionList { all } => assert!(all),
+            Request::SessionList { all, discover } => {
+                assert!(all);
+                assert!(!discover);
+            }
+            _ => panic!("wrong request type"),
+        }
+    }
+
+    #[test]
+    fn test_request_roundtrip_session_list_discover() {
+        let req = Request::SessionList {
+            all: false,
+            discover: true,
+        };
+        let frame = encode_request(&req).unwrap();
+        let decoded = decode_request(frame[0], &frame[5..]).unwrap();
+        match decoded {
+            Request::SessionList { all, discover } => {
+                assert!(!all);
+                assert!(discover);
+            }
             _ => panic!("wrong request type"),
         }
     }
