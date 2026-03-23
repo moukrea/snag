@@ -459,7 +459,7 @@ pub fn cmd_hook(shell: &str) -> Result<()> {
 
   # Auto-start daemon if needed (snag register handles this)
   local _snag_result
-  _snag_result="$(snag register 2>/dev/null)"
+  _snag_result="$(snag register --pid $$ 2>/dev/null)"
   if [ $? -eq 0 ] && [ -n "$_snag_result" ]; then
     eval "$_snag_result"
   fi
@@ -478,7 +478,7 @@ _snag_hook
 
   # Auto-start daemon if needed (snag register handles this)
   local _snag_result
-  _snag_result="$(snag register 2>/dev/null)"
+  _snag_result="$(snag register --pid $$ 2>/dev/null)"
   if [[ $? -eq 0 ]] && [[ -n "$_snag_result" ]]; then
     eval "$_snag_result"
   fi
@@ -496,7 +496,7 @@ _snag_hook
     }
 }
 
-pub async fn cmd_register(config: &Config, name: Option<String>) -> Result<()> {
+pub async fn cmd_register(config: &Config, pid: Option<u32>, name: Option<String>) -> Result<()> {
     // Determine the current PTS
     let pts = get_current_pts();
     let Some(pts) = pts else {
@@ -504,8 +504,8 @@ pub async fn cmd_register(config: &Config, name: Option<String>) -> Result<()> {
         std::process::exit(1);
     };
 
-    // The shell PID is our PARENT (snag register is a child of the shell)
-    let shell_pid = nix::unistd::getppid().as_raw() as u32;
+    // Use --pid from the hook ($$), or fall back to our parent PID
+    let shell_pid = pid.unwrap_or_else(|| nix::unistd::getppid().as_raw() as u32);
 
     let mut client = DaemonClient::connect(config).await?;
     let resp = client

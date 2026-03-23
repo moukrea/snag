@@ -113,6 +113,9 @@ pub enum Command {
     },
     /// Register the current shell session with the daemon (called by hook)
     Register {
+        /// Shell PID (passed by the hook via $$)
+        #[arg(long)]
+        pid: Option<u32>,
         /// Session name
         #[arg(long)]
         name: Option<String>,

@@ -54,7 +54,9 @@ async fn main() {
             cli::commands::cmd_grep(&config, pattern, json).await
         }
         Some(Command::Hook { shell }) => cli::commands::cmd_hook(&shell),
-        Some(Command::Register { name }) => cli::commands::cmd_register(&config, name).await,
+        Some(Command::Register { pid, name }) => {
+            cli::commands::cmd_register(&config, pid, name).await
+        }
         Some(Command::Unregister { target }) => {
             cli::commands::cmd_unregister(&config, target).await
         }
