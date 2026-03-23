@@ -104,6 +104,14 @@ pub enum Command {
         /// Session ID or name
         target: String,
     },
+    /// Search session output for a pattern
+    Grep {
+        /// Pattern to search for
+        pattern: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Scan for adoptable PTY sessions
     Scan,
     /// Adopt an existing PTY session

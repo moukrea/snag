@@ -458,6 +458,29 @@ pub async fn cmd_scan(config: &Config) -> Result<()> {
     }
 }
 
+pub async fn cmd_grep(config: &Config, pattern: String, json: bool) -> Result<()> {
+    let mut client = DaemonClient::connect(config).await?;
+    let resp = client.request(&Request::SessionGrep { pattern }).await?;
+    match resp {
+        Response::Ok(ResponseData::GrepResult(matches)) => {
+            if json {
+                output::print_grep_json(&matches);
+            } else {
+                output::print_grep(&matches);
+            }
+            Ok(())
+        }
+        Response::Error { message, .. } => {
+            eprintln!("error: {message}");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("unexpected response");
+            std::process::exit(1);
+        }
+    }
+}
+
 pub async fn cmd_adopt(config: &Config, pts_or_pid: String, name: Option<String>) -> Result<()> {
     let mut client = DaemonClient::connect(config).await?;
     let resp = client

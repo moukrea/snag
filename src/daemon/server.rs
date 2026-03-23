@@ -314,6 +314,7 @@ async fn handle_request(
         Request::SessionCwd { target } => handle_session_cwd(registry, &target),
         Request::SessionPs { target } => handle_session_ps(registry, &target),
         Request::SessionScan => handle_session_scan(),
+        Request::SessionGrep { pattern } => handle_session_grep(registry, &pattern),
         Request::SessionAdopt { pts_or_pid, name } => {
             handle_session_adopt(registry, &pts_or_pid, name, scrollback_bytes, event_tx).await
         }
@@ -741,6 +742,79 @@ fn handle_session_scan() -> Response {
             message: e.to_string(),
         },
     }
+}
+
+fn handle_session_grep(registry: &SessionRegistry, pattern: &str) -> Response {
+    let pattern_lower = pattern.to_lowercase();
+    let mut matches = Vec::new();
+
+    for session in registry.iter() {
+        let raw = session.scrollback.all_bytes();
+        if raw.is_empty() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&raw);
+        let stripped = strip_ansi(&text);
+        let matching_lines: Vec<String> = stripped
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                !trimmed.is_empty() && trimmed.to_lowercase().contains(&pattern_lower)
+            })
+            .map(|l| l.to_string())
+            .collect();
+
+        if !matching_lines.is_empty() {
+            matches.push(GrepMatch {
+                session_id: session.id.clone(),
+                session_name: session.name.clone(),
+                lines: matching_lines,
+            });
+        }
+    }
+
+    Response::Ok(ResponseData::GrepResult(matches))
+}
+
+/// Strip ANSI escape sequences from text for plain-text searching.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // CSI sequence: ESC [ ... final_byte
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                while let Some(&nc) = chars.peek() {
+                    chars.next();
+                    if nc.is_ascii_alphabetic() || nc == '~' {
+                        break;
+                    }
+                }
+            // OSC sequence: ESC ] ... ST (BEL or ESC \)
+            } else if chars.peek() == Some(&']') {
+                chars.next();
+                while let Some(&nc) = chars.peek() {
+                    chars.next();
+                    if nc == '\x07' {
+                        break;
+                    }
+                    if nc == '\x1b' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            } else {
+                // Other escape: skip next char
+                chars.next();
+            }
+        } else if c.is_control() && c != '\n' && c != '\t' {
+            // Skip other control chars
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 async fn handle_session_adopt(
