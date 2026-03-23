@@ -774,7 +774,7 @@ fn handle_session_grep(registry: &SessionRegistry, pattern: &str) -> Response {
         }
     }
 
-    // 2. Search non-managed sessions' shell history files (non-invasive)
+    // 2. Probe non-managed sessions by injecting `history` command
     let managed_pts: std::collections::HashSet<String> = registry
         .iter()
         .map(|s| s.pts_path.to_string_lossy().into_owned())
@@ -785,13 +785,9 @@ fn handle_session_grep(registry: &SessionRegistry, pattern: &str) -> Response {
             if managed_pts.contains(&session.pts) {
                 continue;
             }
-            let Some(shell_pid) = session.shell_pid else {
-                continue;
-            };
-            if let Some(history) = read_shell_history(shell_pid, &session.command) {
-                let matching_lines: Vec<String> = history
+            if let Some(content) = probe_session_history(session) {
+                let matching_lines: Vec<String> = content
                     .lines()
-                    .map(|l| strip_zsh_history_meta(l, &session.command))
                     .filter(|line| {
                         let trimmed = line.trim();
                         !trimmed.is_empty() && trimmed.to_lowercase().contains(&pattern_lower)
@@ -818,41 +814,88 @@ fn handle_session_grep(registry: &SessionRegistry, pattern: &str) -> Response {
     Response::Ok(ResponseData::GrepResult(matches))
 }
 
-/// Read a shell's history file by looking up HOME from /proc/<pid>/environ.
-fn read_shell_history(shell_pid: u32, shell_name: &str) -> Option<String> {
-    let environ = std::fs::read(format!("/proc/{shell_pid}/environ")).ok()?;
-    let env_entries: Vec<&str> = environ
-        .split(|&b| b == 0)
-        .filter_map(|entry| std::str::from_utf8(entry).ok())
-        .collect();
+/// Probe a non-managed session by briefly stealing the master fd,
+/// injecting `history` to a temp file, reading it, and cleaning up.
+/// The fd is dropped immediately — the session is NOT adopted.
+fn probe_session_history(session: &crate::protocol::DiscoveredSession) -> Option<String> {
+    // Find the actual shell (may need to walk up from foreground process)
+    let shell_pid = session.shell_pid?;
+    let shell_name = find_shell_name(shell_pid)?;
 
-    let home = env_entries.iter().find_map(|e| e.strip_prefix("HOME="))?;
+    // Steal the master fd temporarily
+    let master_fd = adopt::adopt_pty(session.holder_pid, session.holder_fd).ok()?;
 
-    // Respect custom HISTFILE if set
-    let histfile =
-        if let Some(custom) = env_entries.iter().find_map(|e| e.strip_prefix("HISTFILE=")) {
-            custom.to_string()
-        } else {
-            match shell_name {
-                "bash" => format!("{home}/.bash_history"),
-                "zsh" => format!("{home}/.zsh_history"),
-                _ => return None,
-            }
-        };
+    // Create temp file path
+    let mut rand_bytes = [0u8; 4];
+    getrandom::getrandom(&mut rand_bytes).ok()?;
+    let rand_hex = hex::encode(rand_bytes);
+    let tmp_path = format!("/tmp/.snag-probe-{rand_hex}");
 
-    std::fs::read_to_string(histfile).ok()
+    // Inject history dump command (Ctrl+U clears current input)
+    let cmd = match shell_name.as_str() {
+        "bash" => format!("\x15 HISTTIMEFORMAT= history > '{tmp_path}' 2>/dev/null\n"),
+        "zsh" => format!("\x15 fc -l 1 > '{tmp_path}' 2>/dev/null\n"),
+        _ => return None,
+    };
+    // Leading space + HISTCONTROL=ignorespace means command won't be saved to history
+    nix::unistd::write(&master_fd, cmd.as_bytes()).ok()?;
+
+    // Wait for the shell to execute the command
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    // Read the result
+    let content = std::fs::read_to_string(&tmp_path).ok();
+
+    // Clean up: remove temp file via injection and filesystem
+    let cleanup = format!("\x15 rm -f '{tmp_path}' 2>/dev/null\n");
+    let _ = nix::unistd::write(&master_fd, cleanup.as_bytes());
+    let _ = std::fs::remove_file(&tmp_path);
+
+    // Drop master_fd — session is NOT adopted, terminal emulator keeps control
+    drop(master_fd);
+
+    // Strip line numbers from history output (bash: "  123  command", zsh: "  123  command")
+    content.map(|c| {
+        c.lines()
+            .map(|line| {
+                let trimmed = line.trim_start();
+                // Skip the leading number and whitespace
+                if let Some(pos) = trimmed.find(|c: char| !c.is_ascii_digit()) {
+                    trimmed[pos..].trim_start().to_string()
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
 }
 
-/// Strip zsh extended history metadata prefix (`: timestamp:duration;`)
-fn strip_zsh_history_meta<'a>(line: &'a str, shell: &str) -> &'a str {
-    if shell == "zsh" {
-        if let Some(rest) = line.strip_prefix(": ") {
-            if let Some(pos) = rest.find(';') {
-                return &rest[pos + 1..];
+/// Find the shell name for a PID, walking up the parent chain if needed.
+fn find_shell_name(pid: u32) -> Option<String> {
+    let comm = pty::read_comm(pid)?;
+    if matches!(comm.as_str(), "bash" | "zsh") {
+        return Some(comm);
+    }
+    // Walk parent chain
+    let mut cur = pid;
+    for _ in 0..10 {
+        let stat = std::fs::read_to_string(format!("/proc/{cur}/stat")).ok()?;
+        let ppid: u32 = stat
+            .rfind(')')
+            .and_then(|i| stat[i + 2..].split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())?;
+        if ppid <= 1 {
+            return None;
+        }
+        if let Some(c) = pty::read_comm(ppid) {
+            if matches!(c.as_str(), "bash" | "zsh") {
+                return Some(c);
             }
         }
+        cur = ppid;
     }
-    line
+    None
 }
 
 /// Strip ANSI escape sequences from text for plain-text searching.
