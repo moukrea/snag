@@ -53,6 +53,9 @@ pub enum Command {
         /// Include adopted sessions
         #[arg(long)]
         all: bool,
+        /// Also discover system PTY sessions available for adoption
+        #[arg(long, short = 'd')]
+        discover: bool,
     },
     /// Show session details
     Info {

@@ -198,6 +198,7 @@ async fn refresh_sessions(client: &mut DaemonClient, app: &mut App) -> Result<()
     let resp = client
         .request(&Request::SessionList {
             all: app.show_adopted,
+            discover: false,
         })
         .await?;
 

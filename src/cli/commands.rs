@@ -64,15 +64,28 @@ pub async fn cmd_rename(config: &Config, target: String, new_name: String) -> Re
     }
 }
 
-pub async fn cmd_list(config: &Config, json: bool, all: bool) -> Result<()> {
+pub async fn cmd_list(config: &Config, json: bool, all: bool, discover: bool) -> Result<()> {
     let mut client = DaemonClient::connect(config).await?;
-    let resp = client.request(&Request::SessionList { all }).await?;
+    let resp = client
+        .request(&Request::SessionList { all, discover })
+        .await?;
     match resp {
         Response::Ok(ResponseData::SessionList(sessions)) => {
             if json {
-                output::print_session_list_json(&sessions);
+                output::print_session_list_json(&sessions, &[]);
             } else {
-                output::print_session_list(&sessions);
+                output::print_session_list(&sessions, &[]);
+            }
+            Ok(())
+        }
+        Response::Ok(ResponseData::SessionListDiscovered {
+            sessions,
+            discovered,
+        }) => {
+            if json {
+                output::print_session_list_json(&sessions, &discovered);
+            } else {
+                output::print_session_list(&sessions, &discovered);
             }
             Ok(())
         }
