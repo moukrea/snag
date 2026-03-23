@@ -8,7 +8,7 @@ use crate::daemon::session::{
 use crate::error::Result;
 use crate::protocol::*;
 use std::collections::HashMap;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::AsyncWriteExt;
@@ -186,9 +186,10 @@ pub async fn run_daemon(config: Config) -> Result<()> {
             }
             _ = sigterm.recv() => {
                 eprintln!("snagd: received SIGTERM, shutting down");
-                // Kill all sessions
-                for session in registry.iter() {
-                    if let Some(pid) = session.child_pid {
+                for session in registry.iter_mut() {
+                    if session.adopted {
+                        teardown_output_capture(session);
+                    } else if let Some(pid) = session.child_pid {
                         pty::kill_session(pid);
                     }
                 }
@@ -447,6 +448,13 @@ async fn pty_read_loop(session_id: String, master_fd: i32, event_tx: mpsc::Sende
 fn handle_session_kill(registry: &mut SessionRegistry, target: &str) -> Response {
     match registry.resolve(target) {
         Ok(id) => {
+            // Teardown capture before removal (needs mutable access to session)
+            if let Some(session) = registry.get_mut(&id) {
+                if session.adopted {
+                    teardown_output_capture(session);
+                }
+            }
+
             if let Some(session) = registry.remove(&id) {
                 // For adopted sessions, just drop the fd — don't kill the shell.
                 // The shell continues running in the original terminal.
@@ -481,8 +489,13 @@ fn handle_session_release(registry: &mut SessionRegistry, target: &str) -> Respo
                     };
                 }
             }
-            // Remove from registry — this drops the master fd without killing the shell.
-            // The shell continues running and the original terminal emulator retains control.
+
+            // Teardown capture (restores direct tty output in the shell)
+            if let Some(session) = registry.get_mut(&id) {
+                teardown_output_capture(session);
+            }
+
+            // Remove from registry — drops the master fd without killing the shell.
             if registry.remove(&id).is_some() {
                 Response::Ok(ResponseData::Empty)
             } else {
@@ -626,12 +639,15 @@ fn handle_session_output(
     match registry.resolve(target) {
         Ok(id) => {
             if let Some(session) = registry.get_mut(&id) {
-                // Adopted sessions don't capture output (the terminal emulator is the reader)
-                if session.adopted && session.scrollback.is_empty() {
+                // For adopted sessions without capture, warn
+                if session.adopted
+                    && session.capture_path.is_none()
+                    && session.scrollback.is_empty()
+                {
                     return Response::Error {
                         code: 9,
-                        message: "output capture is not available for adopted sessions; \
-                                  output is displayed in the original terminal emulator"
+                        message: "output capture not available: shell does not support \
+                                  process substitution (requires bash or zsh)"
                             .to_string(),
                     };
                 }
@@ -643,14 +659,7 @@ fn handle_session_output(
                 };
 
                 if follow {
-                    if session.adopted {
-                        return Response::Error {
-                            code: 9,
-                            message: "follow mode is not available for adopted sessions"
-                                .to_string(),
-                        };
-                    }
-                    // Attach client for follow mode (read-only)
+                    // Follow mode works for adopted sessions with capture
                     session.attached_clients.push(client_id);
                     if let Some(client) = clients.get_mut(&client_id) {
                         client.session_id = Some(id.clone());
@@ -722,7 +731,7 @@ async fn handle_session_adopt(
     pts_or_pid: &str,
     name: Option<String>,
     scrollback_bytes: usize,
-    _event_tx: &mpsc::Sender<DaemonEvent>,
+    event_tx: &mpsc::Sender<DaemonEvent>,
 ) -> Response {
     // Validate name if provided
     if let Some(ref n) = name {
@@ -770,6 +779,13 @@ async fn handle_session_adopt(
     match adopt::adopt_pty(discovered.holder_pid, discovered.holder_fd) {
         Ok(master_fd) => {
             let id = generate_session_id();
+
+            // NOTE: We do NOT start a pty_read_loop for adopted sessions.
+            // The terminal emulator must remain the sole reader of the PTY master fd.
+            // Instead, we inject a tee command into the shell to duplicate output to a
+            // capture file, which we tail for scrollback/output capture.
+            let capture_path = setup_output_capture(&master_fd, discovered.shell_pid, &id);
+
             let session = Session::new_adopted(
                 id.clone(),
                 name,
@@ -778,21 +794,144 @@ async fn handle_session_adopt(
                 discovered.command.clone(),
                 PathBuf::from(&discovered.pts),
                 scrollback_bytes,
+                capture_path.clone(),
             );
 
-            // NOTE: We intentionally do NOT start a pty_read_loop for adopted sessions.
-            // The original terminal emulator (Konsole, GNOME Terminal, etc.) must remain
-            // the sole reader of the PTY master fd. If we read from it, we compete with
-            // the terminal emulator and cause freezes or output corruption.
-            // The adopted master fd is used write-only (for sending commands via `snag send`).
-
             registry.insert(session);
+
+            // Start capture file reader if capture was set up
+            if let Some(path) = capture_path {
+                let handle =
+                    tokio::spawn(capture_file_read_loop(path, id.clone(), event_tx.clone()));
+                if let Some(s) = registry.get_mut(&id) {
+                    s.capture_abort = Some(handle.abort_handle());
+                }
+            }
+
             Response::Ok(ResponseData::SessionCreated { id })
         }
         Err(e) => Response::Error {
             code: 8,
             message: e.to_string(),
         },
+    }
+}
+
+/// Set up output capture for an adopted session by injecting a tee command.
+/// Returns the capture file path on success, None if the shell doesn't support it.
+fn setup_output_capture(
+    master_fd: &OwnedFd,
+    shell_pid: Option<u32>,
+    session_id: &str,
+) -> Option<PathBuf> {
+    // Detect shell type
+    let shell_name = shell_pid.and_then(pty::read_comm).unwrap_or_default();
+
+    if !matches!(shell_name.as_str(), "bash" | "zsh") {
+        eprintln!(
+            "snagd: output capture not available for '{}' (requires bash or zsh)",
+            shell_name
+        );
+        return None;
+    }
+
+    // Create capture directory (uses same base as socket path)
+    let capture_dir = capture_dir();
+    if let Err(e) = std::fs::create_dir_all(&capture_dir) {
+        eprintln!("snagd: failed to create capture directory: {e}");
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&capture_dir, std::fs::Permissions::from_mode(0o700));
+    }
+
+    // Pre-create capture file so the reader can open it immediately
+    let path = capture_dir.join(format!("capture-{session_id}"));
+    if let Err(e) = std::fs::File::create(&path) {
+        eprintln!("snagd: failed to create capture file: {e}");
+        return None;
+    }
+
+    // Inject tee command into the shell.
+    // \x15 = Ctrl+U (clear current input line for safety)
+    let cmd = format!("\x15exec > >(tee -a '{}') 2>&1\n", path.display());
+    if nix::unistd::write(master_fd, cmd.as_bytes()).is_err() {
+        eprintln!("snagd: failed to inject capture command");
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+
+    eprintln!("snagd: output capture enabled at {}", path.display());
+    Some(path)
+}
+
+/// Tail a capture file and feed data into the daemon event loop as PtyData events.
+async fn capture_file_read_loop(
+    path: PathBuf,
+    session_id: String,
+    event_tx: mpsc::Sender<DaemonEvent>,
+) {
+    // Give the shell time to execute the tee command
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let mut file = match tokio::fs::File::open(&path).await {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("snagd: failed to open capture file {}: {e}", path.display());
+            return;
+        }
+    };
+
+    let mut buf = vec![0u8; 4096];
+    loop {
+        match tokio::io::AsyncReadExt::read(&mut file, &mut buf).await {
+            Ok(0) => {
+                // EOF — file hasn't grown yet, poll
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Ok(n) => {
+                if event_tx
+                    .send(DaemonEvent::PtyData(session_id.clone(), buf[..n].to_vec()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Err(e) => {
+                eprintln!("snagd: capture read error for {session_id}: {e}");
+                break;
+            }
+        }
+    }
+}
+
+/// Clean up output capture for an adopted session.
+fn teardown_output_capture(session: &mut Session) {
+    // Abort the capture file reader
+    if let Some(abort) = session.capture_abort.take() {
+        abort.abort();
+    }
+
+    // Restore direct tty output in the shell (\x15 = Ctrl+U to clear input line)
+    if session.capture_path.is_some() {
+        let _ = nix::unistd::write(&session.master_fd, b"\x15exec > /dev/tty 2>&1\n");
+    }
+
+    // Remove capture file
+    if let Some(ref path) = session.capture_path.take() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn capture_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+        PathBuf::from(dir).join("snag")
+    } else {
+        let uid = nix::unistd::getuid();
+        PathBuf::from(format!("/tmp/snag-{}", uid))
     }
 }
 
