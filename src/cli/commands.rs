@@ -543,7 +543,7 @@ pub async fn cmd_register(config: &Config, pid: Option<u32>, name: Option<String
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
             println!("export SNAG_SESSION={id}");
             println!("export SNAG_CAPTURE='{escaped_path}'");
-            println!("exec script -qf '{escaped_path}' {shell}");
+            println!("exec script -qfc {shell} '{escaped_path}'");
             Ok(())
         }
         Response::Error { message, .. } => {
