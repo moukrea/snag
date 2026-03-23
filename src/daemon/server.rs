@@ -314,8 +314,13 @@ async fn handle_request(
         Request::SessionCwd { target } => handle_session_cwd(registry, &target),
         Request::SessionPs { target } => handle_session_ps(registry, &target),
         Request::SessionGrep { pattern } => handle_session_grep(registry, &pattern),
-        Request::SessionRegister { pts, name } => {
-            handle_session_register(registry, &pts, name, scrollback_bytes, event_tx).await
+        Request::SessionRegister {
+            pts,
+            shell_pid,
+            name,
+        } => {
+            handle_session_register(registry, &pts, shell_pid, name, scrollback_bytes, event_tx)
+                .await
         }
         Request::SessionUnregister { target } => handle_session_unregister(registry, &target),
         Request::Resize { cols, rows } => handle_resize(registry, clients, client_id, cols, rows),
@@ -754,6 +759,7 @@ fn strip_ansi(s: &str) -> String {
 async fn handle_session_register(
     registry: &mut SessionRegistry,
     pts: &str,
+    shell_pid: u32,
     name: Option<String>,
     scrollback_bytes: usize,
     event_tx: &mpsc::Sender<DaemonEvent>,
@@ -804,12 +810,13 @@ async fn handle_session_register(
             // but we still create the capture file and start reading it)
             let capture_path = setup_capture_file(&id);
 
+            let shell_name = pty::read_comm(shell_pid).unwrap_or_else(|| "shell".to_string());
             let session = Session::new_registered(
                 id.clone(),
                 name,
                 master_fd,
-                discovered.shell_pid,
-                discovered.command.clone(),
+                Some(shell_pid),
+                shell_name,
                 PathBuf::from(&discovered.pts),
                 scrollback_bytes,
                 capture_path.clone(),

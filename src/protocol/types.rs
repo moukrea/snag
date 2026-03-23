@@ -64,6 +64,7 @@ pub enum Request {
     },
     SessionRegister {
         pts: String,
+        shell_pid: u32,
         name: Option<String>,
     },
     SessionUnregister {

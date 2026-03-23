@@ -281,14 +281,20 @@ mod tests {
     fn test_request_roundtrip_session_register() {
         let req = Request::SessionRegister {
             pts: "/dev/pts/3".to_string(),
+            shell_pid: 12345,
             name: Some("my-shell".to_string()),
         };
         let frame = encode_request(&req).unwrap();
         assert_eq!(frame[0], MSG_SESSION_REGISTER);
         let decoded = decode_request(frame[0], &frame[5..]).unwrap();
         match decoded {
-            Request::SessionRegister { pts, name } => {
+            Request::SessionRegister {
+                pts,
+                shell_pid,
+                name,
+            } => {
                 assert_eq!(pts, "/dev/pts/3");
+                assert_eq!(shell_pid, 12345);
                 assert_eq!(name.as_deref(), Some("my-shell"));
             }
             _ => panic!("wrong request type"),

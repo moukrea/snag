@@ -504,9 +504,16 @@ pub async fn cmd_register(config: &Config, name: Option<String>) -> Result<()> {
         std::process::exit(1);
     };
 
+    // The shell PID is our PARENT (snag register is a child of the shell)
+    let shell_pid = nix::unistd::getppid().as_raw() as u32;
+
     let mut client = DaemonClient::connect(config).await?;
     let resp = client
-        .request(&Request::SessionRegister { pts, name })
+        .request(&Request::SessionRegister {
+            pts,
+            shell_pid,
+            name,
+        })
         .await?;
     match resp {
         Response::Ok(ResponseData::SessionRegistered { id, capture_path }) => {

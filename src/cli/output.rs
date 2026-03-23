@@ -26,7 +26,7 @@ pub fn print_session_list(sessions: &[SessionInfo]) {
         "ID",
         "NAME",
         "SHELL",
-        "STATUS",
+        "STATE",
         "CWD",
         id_w = id_width,
         name_w = name_width,
@@ -43,13 +43,7 @@ pub fn print_session_list(sessions: &[SessionInfo]) {
         let name = s.name.as_deref().unwrap_or("-");
         let cwd = shorten_path(&s.cwd, 30);
         let fg = s.fg_process.as_deref().unwrap_or("idle");
-        let status = if s.state.starts_with("exited") {
-            &s.state
-        } else if s.registered {
-            "registered"
-        } else {
-            "managed"
-        };
+        let status = &s.state;
 
         println!(
             "{:<id_w$}  {:<name_w$}  {:<shell_w$}  {:<10}  {:<30}  {}",
