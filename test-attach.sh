@@ -10,7 +10,7 @@ case "${1:-}" in
   top)
     snag daemon stop 2>/dev/null || true
     sleep 0.5
-    snag daemon start &
+    snag daemon start 2>/dev/null &
     sleep 1
     echo "=== Registering this shell with snag ==="
     eval "$(snag hook bash)"

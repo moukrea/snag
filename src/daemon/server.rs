@@ -908,7 +908,6 @@ fn setup_capture_file(session_id: &str) -> Option<PathBuf> {
         return None;
     }
 
-    eprintln!("snagd: capture file created at {}", path.display());
     Some(path)
 }
 
