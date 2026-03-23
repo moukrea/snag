@@ -3,6 +3,7 @@ use crate::client::DaemonClient;
 use crate::config::Config;
 use crate::error::Result;
 use crate::protocol::*;
+use std::os::fd::{AsRawFd, FromRawFd};
 
 pub async fn cmd_new(
     config: &Config,
@@ -113,7 +114,6 @@ pub async fn cmd_info(config: &Config, target: String, json: bool) -> Result<()>
 pub async fn cmd_attach(config: &Config, target: String, read_only: bool) -> Result<()> {
     use crossterm::event::{self, Event, KeyCode, KeyModifiers};
     use crossterm::terminal;
-    use std::io::Write;
 
     let mut client = DaemonClient::connect(config).await?;
 
@@ -125,11 +125,15 @@ pub async fn cmd_attach(config: &Config, target: String, read_only: bool) -> Res
         })
         .await?;
 
-    // Print initial scrollback
+    // Print initial scrollback directly to /dev/tty (bypasses tee redirect)
+    let mut tty_init = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/tty")
+        .unwrap_or_else(|_| unsafe { std::fs::File::from_raw_fd(std::io::stdout().as_raw_fd()) });
     match resp {
         Response::Ok(ResponseData::Output(scrollback)) => {
-            print!("{scrollback}");
-            std::io::stdout().flush()?;
+            let _ = std::io::Write::write_all(&mut tty_init, scrollback.as_bytes());
+            let _ = std::io::Write::flush(&mut tty_init);
         }
         Response::Error { message, .. } => {
             eprintln!("error: {message}");
@@ -154,15 +158,27 @@ pub async fn cmd_attach(config: &Config, target: String, read_only: bool) -> Res
     let detach_timeout = std::time::Duration::from_millis(config.detach_timeout_ms);
     let mut last_escape: Option<std::time::Instant> = None;
 
+    // Open /dev/tty directly for output — bypasses any stdout redirect
+    // (e.g. the shell hook's tee pipe) to write straight to the terminal.
+    let tty_out = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/tty")
+        .unwrap_or_else(|_| {
+            // Fallback to stdout if /dev/tty is unavailable
+            unsafe { std::fs::File::from_raw_fd(std::io::stdout().as_raw_fd()) }
+        });
+    let tty_out = std::sync::Arc::new(std::sync::Mutex::new(tty_out));
+
     // Spawn reader task for PTY output
+    let tty_writer = tty_out.clone();
     let reader_handle = tokio::spawn(async move {
         loop {
             match read_frame(&mut reader).await {
                 Ok(Some((msg_type, payload))) => {
                     if msg_type == MSG_PTY_OUTPUT {
-                        let mut stdout = std::io::stdout();
-                        let _ = stdout.write_all(&payload);
-                        let _ = stdout.flush();
+                        let mut tty = tty_writer.lock().unwrap();
+                        let _ = std::io::Write::write_all(&mut *tty, &payload);
+                        let _ = std::io::Write::flush(&mut *tty);
                     } else if msg_type == MSG_SESSION_EVENT {
                         // Session exited
                         break;
