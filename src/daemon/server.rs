@@ -245,13 +245,20 @@ async fn handle_client_connection(
 
     let write_task = tokio::spawn(async move {
         while let Some(data) = rx.recv().await {
+            eprintln!(
+                "snagd: [write-task] client {client_id}: writing {} bytes to socket",
+                data.len()
+            );
             if writer.write_all(&data).await.is_err() {
+                eprintln!("snagd: [write-task] client {client_id}: write error, exiting");
                 break;
             }
             if writer.flush().await.is_err() {
+                eprintln!("snagd: [write-task] client {client_id}: flush error, exiting");
                 break;
             }
         }
+        eprintln!("snagd: [write-task] client {client_id}: task ended");
     });
 
     loop {

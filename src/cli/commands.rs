@@ -112,8 +112,9 @@ pub async fn cmd_info(config: &Config, target: String, json: bool) -> Result<()>
 }
 
 pub async fn cmd_attach(config: &Config, target: String, read_only: bool) -> Result<()> {
-    use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+    use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
     use crossterm::terminal;
+    use futures_lite::StreamExt;
 
     let mut client = DaemonClient::connect(config).await?;
 
@@ -141,6 +142,7 @@ pub async fn cmd_attach(config: &Config, target: String, read_only: bool) -> Res
         }
         _ => {}
     }
+    drop(tty_init);
 
     // Enter raw mode
     terminal::enable_raw_mode()?;
@@ -154,101 +156,81 @@ pub async fn cmd_attach(config: &Config, target: String, read_only: bool) -> Res
     let mut reader = tokio::io::BufReader::new(reader);
     let mut writer = writer;
 
-    // Track escape sequence for detach (Ctrl+\ double-tap)
+    // Open /dev/tty directly for output — bypasses any stdout redirect
+    let mut tty_out = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/tty")
+        .unwrap_or_else(|_| unsafe { std::fs::File::from_raw_fd(std::io::stdout().as_raw_fd()) });
+
+    // Track detach sequence
     let detach_timeout = std::time::Duration::from_millis(config.detach_timeout_ms);
     let mut last_escape: Option<std::time::Instant> = None;
 
-    // Open /dev/tty directly for output — bypasses any stdout redirect
-    // (e.g. the shell hook's tee pipe) to write straight to the terminal.
-    let tty_out = std::fs::OpenOptions::new()
-        .write(true)
-        .open("/dev/tty")
-        .unwrap_or_else(|_| {
-            // Fallback to stdout if /dev/tty is unavailable
-            unsafe { std::fs::File::from_raw_fd(std::io::stdout().as_raw_fd()) }
-        });
-    let tty_out = std::sync::Arc::new(std::sync::Mutex::new(tty_out));
+    // Use async EventStream instead of blocking event::poll
+    let mut events = EventStream::new();
 
-    // Spawn reader task for PTY output
-    let tty_writer = tty_out.clone();
-    let reader_handle = tokio::spawn(async move {
-        loop {
-            match read_frame(&mut reader).await {
-                Ok(Some((msg_type, payload))) => {
-                    if msg_type == MSG_PTY_OUTPUT {
-                        let mut tty = tty_writer.lock().unwrap();
-                        let _ = std::io::Write::write_all(&mut *tty, &payload);
-                        let _ = std::io::Write::flush(&mut *tty);
-                    } else if msg_type == MSG_SESSION_EVENT {
-                        // Session exited
-                        break;
-                    } else if msg_type == MSG_OK || msg_type == MSG_ERROR {
-                        // Response to a control message, ignore
-                    }
-                }
-                Ok(None) => break,
-                Err(_) => break,
-            }
-        }
-    });
-
-    // Input loop
     let result = loop {
-        if let Ok(true) = event::poll(std::time::Duration::from_millis(50)) {
-            match event::read() {
-                Ok(Event::Key(key_event)) => {
-                    // Check for detach sequence: Ctrl+\ or Ctrl+q (double-tap)
-                    let is_detach_key = (key_event.code == KeyCode::Char('\\')
-                        && key_event.modifiers.contains(KeyModifiers::CONTROL))
-                        || (key_event.code == KeyCode::Char('q')
-                            && key_event.modifiers.contains(KeyModifiers::CONTROL));
-                    if is_detach_key {
-                        if let Some(last) = last_escape {
-                            if last.elapsed() < detach_timeout {
-                                // Double-tap detected — detach
-                                break Ok(());
+        tokio::select! {
+            // Read frames from the daemon (PTY output)
+            frame = read_frame(&mut reader) => {
+                match frame {
+                    Ok(Some((msg_type, payload))) => {
+                        if msg_type == MSG_PTY_OUTPUT {
+                            let _ = std::io::Write::write_all(&mut tty_out, &payload);
+                            let _ = std::io::Write::flush(&mut tty_out);
+                        } else if msg_type == MSG_SESSION_EVENT {
+                            break Ok(());
+                        }
+                        // MSG_OK/MSG_ERROR from control messages — ignore
+                    }
+                    Ok(None) => break Ok(()),
+                    Err(e) => break Err(e),
+                }
+            }
+            // Read keyboard events
+            event = events.next() => {
+                let Some(event) = event else { break Ok(()) };
+                let Ok(event) = event else { continue };
+                match event {
+                    Event::Key(key_event) => {
+                        let is_detach_key = (key_event.code == KeyCode::Char('\\')
+                            && key_event.modifiers.contains(KeyModifiers::CONTROL))
+                            || (key_event.code == KeyCode::Char('q')
+                                && key_event.modifiers.contains(KeyModifiers::CONTROL));
+                        if is_detach_key {
+                            if let Some(last) = last_escape {
+                                if last.elapsed() < detach_timeout {
+                                    break Ok(());
+                                }
+                            }
+                            last_escape = Some(std::time::Instant::now());
+                            continue;
+                        }
+                        last_escape = None;
+                        if read_only { continue; }
+                        let bytes = key_event_to_bytes(&key_event);
+                        if !bytes.is_empty() {
+                            let req = Request::PtyInput(bytes);
+                            let frame = match encode_request(&req) {
+                                Ok(f) => f,
+                                Err(e) => break Err(e),
+                            };
+                            if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut writer, &frame).await {
+                                break Err(e.into());
                             }
                         }
-                        last_escape = Some(std::time::Instant::now());
-                        continue;
                     }
-
-                    last_escape = None;
-
-                    if read_only {
-                        continue;
-                    }
-
-                    // Convert key event to bytes
-                    let bytes = key_event_to_bytes(&key_event);
-                    if !bytes.is_empty() {
-                        let req = Request::PtyInput(bytes);
+                    Event::Resize(cols, rows) => {
+                        let req = Request::Resize { cols, rows };
                         let frame = match encode_request(&req) {
                             Ok(f) => f,
                             Err(e) => break Err(e),
                         };
-                        if let Err(e) =
-                            tokio::io::AsyncWriteExt::write_all(&mut writer, &frame).await
-                        {
-                            break Err(e.into());
-                        }
+                        let _ = tokio::io::AsyncWriteExt::write_all(&mut writer, &frame).await;
                     }
+                    _ => {}
                 }
-                Ok(Event::Resize(cols, rows)) => {
-                    let req = Request::Resize { cols, rows };
-                    let frame = match encode_request(&req) {
-                        Ok(f) => f,
-                        Err(e) => break Err(e),
-                    };
-                    let _ = tokio::io::AsyncWriteExt::write_all(&mut writer, &frame).await;
-                }
-                _ => {}
             }
-        }
-
-        // Check if reader task finished (session exited)
-        if reader_handle.is_finished() {
-            break Ok(());
         }
     };
 
