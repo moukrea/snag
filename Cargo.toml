@@ -6,7 +6,7 @@ description = "Local PTY session multiplexer — spawn, discover, attach to, and
 license = "MIT"
 
 [dependencies]
-tokio = { version = "1", features = ["rt", "io-util", "net", "signal", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "io-util", "net", "signal", "macros", "sync", "time", "fs"] }
 nix = { version = "0.29", features = ["term", "fs", "process", "signal", "user"] }
 clap = { version = "4", features = ["derive"] }
 rmp-serde = "1"

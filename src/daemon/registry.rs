@@ -166,6 +166,8 @@ mod tests {
             scrollback: RingBuffer::new(1024),
             attached_clients: Vec::new(),
             adopted: false,
+            capture_path: None,
+            capture_abort: None,
         }
     }
 

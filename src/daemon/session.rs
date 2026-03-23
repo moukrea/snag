@@ -30,6 +30,8 @@ pub struct Session {
     pub scrollback: RingBuffer,
     pub attached_clients: Vec<ClientId>,
     pub adopted: bool,
+    pub capture_path: Option<PathBuf>,
+    pub capture_abort: Option<tokio::task::AbortHandle>,
 }
 
 impl Session {
@@ -55,9 +57,12 @@ impl Session {
             scrollback: RingBuffer::new(scrollback_bytes),
             attached_clients: Vec::new(),
             adopted: false,
+            capture_path: None,
+            capture_abort: None,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_adopted(
         id: SessionId,
         name: Option<String>,
@@ -66,6 +71,7 @@ impl Session {
         shell: String,
         pts_path: PathBuf,
         scrollback_bytes: usize,
+        capture_path: Option<PathBuf>,
     ) -> Self {
         Self {
             id,
@@ -80,6 +86,8 @@ impl Session {
             scrollback: RingBuffer::new(scrollback_bytes),
             attached_clients: Vec::new(),
             adopted: true,
+            capture_path,
+            capture_abort: None,
         }
     }
 

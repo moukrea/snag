@@ -54,6 +54,7 @@ async fn main() {
         Some(Command::Adopt { pts_or_pid, name }) => {
             cli::commands::cmd_adopt(&config, pts_or_pid, name).await
         }
+        Some(Command::Release { target }) => cli::commands::cmd_release(&config, target).await,
         Some(Command::Daemon { action }) => match action {
             DaemonAction::Start => cli::commands::cmd_daemon_start(&config).await,
             DaemonAction::Stop => cli::commands::cmd_daemon_stop(&config).await,

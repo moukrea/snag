@@ -13,6 +13,7 @@ pub const MSG_SESSION_CWD: u8 = 0x0A;
 pub const MSG_SESSION_PS: u8 = 0x0B;
 pub const MSG_SESSION_SCAN: u8 = 0x0C;
 pub const MSG_SESSION_ADOPT: u8 = 0x0D;
+pub const MSG_SESSION_RELEASE: u8 = 0x0F;
 pub const MSG_RESIZE: u8 = 0x0E;
 pub const MSG_PTY_INPUT: u8 = 0x10;
 pub const MSG_DAEMON_STATUS: u8 = 0xF0;
@@ -67,6 +68,9 @@ pub enum Request {
     SessionAdopt {
         pts_or_pid: String,
         name: Option<String>,
+    },
+    SessionRelease {
+        target: String,
     },
     Resize {
         cols: u16,
