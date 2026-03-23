@@ -919,34 +919,54 @@ async fn capture_file_read_loop(
     // Give the shell time to set up the tee command
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let mut file = match tokio::fs::File::open(&path).await {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("snagd: failed to open capture file {}: {e}", path.display());
-            return;
-        }
-    };
+    // Use a dedicated blocking thread with std::fs::File to properly
+    // maintain the read position when tailing an appended file.
+    // tokio::fs::File can lose position across async read calls.
+    // Use a dedicated OS thread for tailing the capture file.
+    // We use std::fs::File to maintain a stable read position.
+    // Communication back to the tokio runtime uses an unbounded channel
+    // to avoid blocking_send deadlocks on current_thread runtime.
+    let (file_tx, mut file_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
-    let mut buf = vec![0u8; 4096];
-    loop {
-        match tokio::io::AsyncReadExt::read(&mut file, &mut buf).await {
-            Ok(0) => {
-                // EOF — file hasn't grown yet, poll
-                tokio::time::sleep(Duration::from_millis(50)).await;
+    let sid_thread = session_id.clone();
+    std::thread::spawn(move || {
+        let file = match std::fs::File::open(&path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("snagd: failed to open capture file {}: {e}", path.display());
+                return;
             }
-            Ok(n) => {
-                if event_tx
-                    .send(DaemonEvent::PtyData(session_id.clone(), buf[..n].to_vec()))
-                    .await
-                    .is_err()
-                {
+        };
+
+        let mut reader = std::io::BufReader::new(file);
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut reader, &mut buf) {
+                Ok(0) => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Ok(n) => {
+                    if file_tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("snagd: capture read error for {sid_thread}: {e}");
                     break;
                 }
             }
-            Err(e) => {
-                eprintln!("snagd: capture read error for {session_id}: {e}");
-                break;
-            }
+        }
+    });
+
+    // Bridge: forward data from the OS thread to the daemon event loop
+    let sid_bridge = session_id.clone();
+    while let Some(data) = file_rx.recv().await {
+        if event_tx
+            .send(DaemonEvent::PtyData(sid_bridge.clone(), data))
+            .await
+            .is_err()
+        {
+            break;
         }
     }
 }
