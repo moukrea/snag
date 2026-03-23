@@ -144,25 +144,12 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                         if let Some(session) = registry.get_mut(&session_id) {
                             session.scrollback.write(&data);
                             let attached: Vec<ClientId> = session.attached_clients.clone();
-                            eprintln!(
-                                "snagd: [pty-data] session {}: {} bytes, {} attached clients",
-                                &session_id[..8.min(session_id.len())],
-                                data.len(),
-                                attached.len()
-                            );
                             let output_frame = encode_response(&Response::PtyOutput(data.clone())).unwrap_or_default();
                             for cid in attached {
                                 if let Some(client) = clients.get(&cid) {
-                                    match client.tx.try_send(output_frame.clone()) {
-                                        Ok(_) => eprintln!("snagd: [pty-data] sent to client {cid}"),
-                                        Err(e) => eprintln!("snagd: [pty-data] failed to send to client {cid}: {e}"),
-                                    }
-                                } else {
-                                    eprintln!("snagd: [pty-data] client {cid} not found in clients map");
+                                    let _ = client.tx.try_send(output_frame.clone());
                                 }
                             }
-                        } else {
-                            eprintln!("snagd: [pty-data] session {} not in registry!", &session_id[..8.min(session_id.len())]);
                         }
                     }
                     DaemonEvent::PtyEof(ref session_id) | DaemonEvent::ChildExited(ref session_id, _) => {
@@ -250,15 +237,12 @@ async fn handle_client_connection(
                 data.len()
             );
             if writer.write_all(&data).await.is_err() {
-                eprintln!("snagd: [write-task] client {client_id}: write error, exiting");
                 break;
             }
             if writer.flush().await.is_err() {
-                eprintln!("snagd: [write-task] client {client_id}: flush error, exiting");
                 break;
             }
         }
-        eprintln!("snagd: [write-task] client {client_id}: task ended");
     });
 
     loop {
@@ -946,19 +930,15 @@ async fn capture_file_read_loop(
     // to avoid blocking_send deadlocks on current_thread runtime.
     let (file_tx, mut file_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
-    let path_debug = path.display().to_string();
-    let sid_thread = session_id.clone();
     std::thread::spawn(move || {
-        eprintln!("snagd: [capture-reader] thread started for {sid_thread} at {path_debug}");
         let mut file = match std::fs::File::open(&path) {
             Ok(f) => f,
             Err(e) => {
-                eprintln!("snagd: [capture-reader] failed to open {path_debug}: {e}");
+                eprintln!("snagd: failed to open capture file {}: {e}", path.display());
                 return;
             }
         };
 
-        let mut total_bytes = 0u64;
         let mut buf = [0u8; 4096];
         loop {
             match std::io::Read::read(&mut file, &mut buf) {
@@ -966,19 +946,11 @@ async fn capture_file_read_loop(
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
                 Ok(n) => {
-                    total_bytes += n as u64;
-                    eprintln!(
-                        "snagd: [capture-reader] {sid_thread}: read {n} bytes (total: {total_bytes})"
-                    );
                     if file_tx.send(buf[..n].to_vec()).is_err() {
-                        eprintln!("snagd: [capture-reader] {sid_thread}: channel closed");
                         break;
                     }
                 }
-                Err(e) => {
-                    eprintln!("snagd: [capture-reader] {sid_thread}: read error: {e}");
-                    break;
-                }
+                Err(_) => break,
             }
         }
     });
@@ -986,10 +958,6 @@ async fn capture_file_read_loop(
     // Bridge: forward data from the OS thread to the daemon event loop
     let sid_bridge = session_id.clone();
     while let Some(data) = file_rx.recv().await {
-        eprintln!(
-            "snagd: [capture-bridge] {sid_bridge}: forwarding {} bytes as PtyData",
-            data.len()
-        );
         if event_tx
             .send(DaemonEvent::PtyData(sid_bridge.clone(), data))
             .await
