@@ -130,6 +130,13 @@ pub enum Command {
         #[command(subcommand)]
         action: DaemonAction,
     },
+    /// PTY proxy for shell hook (internal — called via exec from hook)
+    #[command(hide = true)]
+    Wrap {
+        /// Capture file path
+        #[arg(long)]
+        capture: String,
+    },
 }
 
 #[derive(Subcommand)]

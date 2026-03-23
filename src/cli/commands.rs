@@ -4,6 +4,202 @@ use crate::config::Config;
 use crate::error::Result;
 use crate::protocol::*;
 use std::os::fd::{AsRawFd, FromRawFd};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static SIGWINCH_RECEIVED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn handle_sigwinch(_: nix::libc::c_int) {
+    SIGWINCH_RECEIVED.store(true, Ordering::Relaxed);
+}
+
+pub fn cmd_wrap(capture: &str) -> Result<()> {
+    use nix::libc;
+    use nix::pty::openpty;
+    use nix::unistd::{close, dup2, execvp, fork, setsid, ForkResult};
+    use std::ffi::CString;
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+
+    // Create inner PTY pair
+    let pty = openpty(None, None)?;
+
+    // Copy outer terminal size to inner PTY
+    if let Ok((cols, rows)) = crossterm::terminal::size() {
+        let ws = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        unsafe {
+            libc::ioctl(pty.master.as_raw_fd(), libc::TIOCSWINSZ, &ws);
+        }
+    }
+
+    match unsafe { fork()? } {
+        ForkResult::Child => {
+            // Child: exec shell on inner PTY
+            drop(pty.master);
+            let slave_raw = pty.slave.as_raw_fd();
+            setsid().ok();
+            unsafe {
+                libc::ioctl(slave_raw, libc::TIOCSCTTY, 0);
+            }
+            let _ = dup2(slave_raw, libc::STDIN_FILENO);
+            let _ = dup2(slave_raw, libc::STDOUT_FILENO);
+            let _ = dup2(slave_raw, libc::STDERR_FILENO);
+            if slave_raw > libc::STDERR_FILENO {
+                let _ = close(slave_raw);
+            }
+            let shell_cstr = CString::new(shell.as_str()).unwrap();
+            let arg_l = CString::new("-l").unwrap();
+            let _ = execvp(&shell_cstr, &[shell_cstr.clone(), arg_l]);
+            unsafe {
+                libc::_exit(127);
+            }
+        }
+        ForkResult::Parent { child } => {
+            drop(pty.slave);
+
+            // Open capture file for writing
+            let mut capture_file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(capture)?;
+
+            // Open /dev/tty once for output (bypasses any existing redirect)
+            let mut tty_out = std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/tty")
+                .unwrap_or_else(|_| unsafe { std::fs::File::from_raw_fd(libc::STDOUT_FILENO) });
+
+            // Put outer terminal in raw mode
+            crossterm::terminal::enable_raw_mode()?;
+
+            // Install SIGWINCH handler
+            unsafe {
+                libc::signal(
+                    libc::SIGWINCH,
+                    handle_sigwinch as *const () as libc::sighandler_t,
+                );
+            }
+
+            // Set inner PTY master to non-blocking
+            let master_fd = pty.master.as_raw_fd();
+            unsafe {
+                let flags = libc::fcntl(master_fd, libc::F_GETFL);
+                libc::fcntl(master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+
+            // Set stdin to non-blocking
+            unsafe {
+                let flags = libc::fcntl(libc::STDIN_FILENO, libc::F_GETFL);
+                libc::fcntl(libc::STDIN_FILENO, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+
+            // Relay loop using poll
+            let mut buf = [0u8; 4096];
+            let mut pollfds = [
+                libc::pollfd {
+                    fd: libc::STDIN_FILENO,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: master_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+
+            loop {
+                pollfds[0].revents = 0;
+                pollfds[1].revents = 0;
+
+                let ret = unsafe { libc::poll(pollfds.as_mut_ptr(), 2, 100) };
+                if ret < 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == std::io::ErrorKind::Interrupted {
+                        // EINTR from signal — check SIGWINCH and continue
+                    } else {
+                        break;
+                    }
+                }
+
+                // Handle SIGWINCH: propagate terminal resize to inner PTY
+                if SIGWINCH_RECEIVED.swap(false, Ordering::Relaxed) {
+                    if let Ok((cols, rows)) = crossterm::terminal::size() {
+                        let ws = libc::winsize {
+                            ws_row: rows,
+                            ws_col: cols,
+                            ws_xpixel: 0,
+                            ws_ypixel: 0,
+                        };
+                        unsafe {
+                            libc::ioctl(master_fd, libc::TIOCSWINSZ, &ws);
+                        }
+                    }
+                }
+
+                // stdin -> inner master (user input to shell)
+                if pollfds[0].revents & libc::POLLIN != 0 {
+                    let n = unsafe {
+                        libc::read(libc::STDIN_FILENO, buf.as_mut_ptr().cast(), buf.len())
+                    };
+                    if n <= 0 {
+                        break;
+                    }
+                    let _ = nix::unistd::write(&pty.master, &buf[..n as usize]);
+                }
+
+                // inner master -> stdout + capture file (shell output)
+                if pollfds[1].revents & libc::POLLIN != 0 {
+                    let n = unsafe { libc::read(master_fd, buf.as_mut_ptr().cast(), buf.len()) };
+                    if n <= 0 {
+                        break;
+                    }
+                    let data = &buf[..n as usize];
+                    let _ = std::io::Write::write_all(&mut tty_out, data);
+                    let _ = std::io::Write::flush(&mut tty_out);
+                    let _ = std::io::Write::write_all(&mut capture_file, data);
+                    let _ = std::io::Write::flush(&mut capture_file);
+                }
+
+                // Check for HUP/ERR on inner master (shell exited)
+                if pollfds[1].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+                    // Drain remaining data
+                    loop {
+                        let n =
+                            unsafe { libc::read(master_fd, buf.as_mut_ptr().cast(), buf.len()) };
+                        if n <= 0 {
+                            break;
+                        }
+                        let data = &buf[..n as usize];
+                        let _ = std::io::Write::write_all(&mut tty_out, data);
+                        let _ = std::io::Write::write_all(&mut capture_file, data);
+                    }
+                    let _ = std::io::Write::flush(&mut tty_out);
+                    let _ = std::io::Write::flush(&mut capture_file);
+                    break;
+                }
+            }
+
+            // Restore terminal
+            crossterm::terminal::disable_raw_mode()?;
+
+            // Wait for child and exit with its status
+            match nix::sys::wait::waitpid(child, None) {
+                Ok(nix::sys::wait::WaitStatus::Exited(_, code)) => {
+                    std::process::exit(code);
+                }
+                Ok(nix::sys::wait::WaitStatus::Signaled(_, sig, _)) => {
+                    std::process::exit(128 + sig as i32);
+                }
+                _ => std::process::exit(0),
+            }
+        }
+    }
+}
 
 pub async fn cmd_new(
     config: &Config,
@@ -176,9 +372,7 @@ pub async fn cmd_attach(config: &Config, target: String, read_only: bool) -> Res
                 match frame {
                     Ok(Some((msg_type, payload))) => {
                         if msg_type == MSG_PTY_OUTPUT {
-                            // In raw mode, \n must be \r\n for proper display
-                            let fixed = fix_newlines(&payload);
-                            let _ = std::io::Write::write_all(&mut tty_out, &fixed);
+                            let _ = std::io::Write::write_all(&mut tty_out, &payload);
                             let _ = std::io::Write::flush(&mut tty_out);
                         } else if msg_type == MSG_SESSION_EVENT {
                             break Ok(());
@@ -247,18 +441,6 @@ pub async fn cmd_attach(config: &Config, target: String, read_only: bool) -> Res
     println!();
 
     result
-}
-
-/// Convert bare \n to \r\n for raw mode terminal display.
-fn fix_newlines(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len());
-    for (i, &b) in data.iter().enumerate() {
-        if b == b'\n' && (i == 0 || data[i - 1] != b'\r') {
-            out.push(b'\r');
-        }
-        out.push(b);
-    }
-    out
 }
 
 fn key_event_to_bytes(event: &crossterm::event::KeyEvent) -> Vec<u8> {
@@ -535,7 +717,7 @@ pub async fn cmd_register(config: &Config, pid: Option<u32>, name: Option<String
             let escaped_path = capture_path.replace('\'', "'\\''");
             println!("export SNAG_SESSION={id}");
             println!("export SNAG_CAPTURE='{escaped_path}'");
-            println!("exec > >(tee -a '{escaped_path}') 2>&1");
+            println!("exec snag wrap --capture '{escaped_path}'");
             Ok(())
         }
         Response::Error { message, .. } => {

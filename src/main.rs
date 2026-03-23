@@ -60,6 +60,7 @@ async fn main() {
         Some(Command::Unregister { target }) => {
             cli::commands::cmd_unregister(&config, target).await
         }
+        Some(Command::Wrap { capture }) => cli::commands::cmd_wrap(&capture),
         Some(Command::Daemon { action }) => match action {
             DaemonAction::Start => cli::commands::cmd_daemon_start(&config).await,
             DaemonAction::Stop => cli::commands::cmd_daemon_stop(&config).await,
