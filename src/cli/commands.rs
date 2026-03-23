@@ -468,10 +468,12 @@ pub fn cmd_hook(shell: &str) -> Result<()> {
         "bash" => {
             print!(
                 r#"_snag_hook() {{
-  # Skip if already registered
-  [ -n "$SNAG_SESSION" ] && return
+  if [ -n "$SNAG_SESSION" ]; then
+    # Inside script: set up cleanup trap
+    trap 'snag unregister $SNAG_SESSION 2>/dev/null' EXIT
+    return
+  fi
 
-  # Auto-start daemon if needed (snag register handles this)
   local _snag_result
   _snag_result="$(snag register --pid $$ 2>/dev/null)"
   if [ $? -eq 0 ] && [ -n "$_snag_result" ]; then
@@ -487,10 +489,11 @@ _snag_hook
         "zsh" => {
             print!(
                 r#"_snag_hook() {{
-  # Skip if already registered
-  [[ -n "$SNAG_SESSION" ]] && return
+  if [[ -n "$SNAG_SESSION" ]]; then
+    trap 'snag unregister $SNAG_SESSION 2>/dev/null' EXIT
+    return
+  fi
 
-  # Auto-start daemon if needed (snag register handles this)
   local _snag_result
   _snag_result="$(snag register --pid $$ 2>/dev/null)"
   if [[ $? -eq 0 ]] && [[ -n "$_snag_result" ]]; then
@@ -531,14 +534,16 @@ pub async fn cmd_register(config: &Config, pid: Option<u32>, name: Option<String
         .await?;
     match resp {
         Response::Ok(ResponseData::SessionRegistered { id, capture_path }) => {
-            // Print shell commands for the hook to eval
+            // Print shell commands for the hook to eval.
+            // Uses `script` instead of `tee` to capture EVERYTHING:
+            // echo, prompt, output, ANSI escapes — the full terminal session.
+            // `exec script` replaces the shell; the new bash re-sources .bashrc
+            // where the hook sees SNAG_SESSION is set and skips re-registration.
+            let escaped_path = capture_path.replace('\'', "'\\''");
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
             println!("export SNAG_SESSION={id}");
-            println!("export SNAG_CAPTURE={capture_path}");
-            println!(
-                "exec > >(tee -a '{}') 2>&1",
-                capture_path.replace('\'', "'\\''")
-            );
-            println!("trap 'snag unregister {id} 2>/dev/null' EXIT");
+            println!("export SNAG_CAPTURE='{escaped_path}'");
+            println!("exec script -qf '{escaped_path}' {shell}");
             Ok(())
         }
         Response::Error { message, .. } => {
