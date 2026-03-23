@@ -181,10 +181,12 @@ pub async fn cmd_attach(config: &Config, target: String, read_only: bool) -> Res
         if let Ok(true) = event::poll(std::time::Duration::from_millis(50)) {
             match event::read() {
                 Ok(Event::Key(key_event)) => {
-                    // Check for Ctrl+\ (detach sequence)
-                    if key_event.code == KeyCode::Char('\\')
-                        && key_event.modifiers.contains(KeyModifiers::CONTROL)
-                    {
+                    // Check for detach sequence: Ctrl+\ or Ctrl+q (double-tap)
+                    let is_detach_key = (key_event.code == KeyCode::Char('\\')
+                        && key_event.modifiers.contains(KeyModifiers::CONTROL))
+                        || (key_event.code == KeyCode::Char('q')
+                            && key_event.modifiers.contains(KeyModifiers::CONTROL));
+                    if is_detach_key {
                         if let Some(last) = last_escape {
                             if last.elapsed() < detach_timeout {
                                 // Double-tap detected — detach

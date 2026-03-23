@@ -930,7 +930,7 @@ async fn capture_file_read_loop(
 
     let sid_thread = session_id.clone();
     std::thread::spawn(move || {
-        let file = match std::fs::File::open(&path) {
+        let mut file = match std::fs::File::open(&path) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("snagd: failed to open capture file {}: {e}", path.display());
@@ -938,10 +938,9 @@ async fn capture_file_read_loop(
             }
         };
 
-        let mut reader = std::io::BufReader::new(file);
         let mut buf = [0u8; 4096];
         loop {
-            match std::io::Read::read(&mut reader, &mut buf) {
+            match std::io::Read::read(&mut file, &mut buf) {
                 Ok(0) => {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
