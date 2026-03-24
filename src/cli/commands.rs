@@ -100,6 +100,7 @@ pub fn cmd_wrap(capture: &str) -> Result<()> {
             }
 
             let mut is_snagged = false;
+            let mut tty_bytes_written: u64 = 0; // track how much was sent to tty
 
             // Set inner PTY master to non-blocking
             let master_fd = pty.master.as_raw_fd();
@@ -171,10 +172,17 @@ pub fn cmd_wrap(capture: &str) -> Result<()> {
                 }
                 if UNSNAGGED.swap(false, Ordering::Relaxed) && is_snagged {
                     is_snagged = false;
-                    // Clear screen and redraw (send Ctrl+L to inner shell)
+                    // Replay missed output from capture file
                     let _ = std::io::Write::write_all(&mut tty_out, b"\x1b[2J\x1b[H");
+                    if let Ok(mut replay) = std::fs::File::open(capture) {
+                        use std::io::{Read, Seek, SeekFrom};
+                        let _ = replay.seek(SeekFrom::Start(tty_bytes_written));
+                        let mut replay_buf = Vec::new();
+                        let _ = replay.read_to_end(&mut replay_buf);
+                        let _ = std::io::Write::write_all(&mut tty_out, &replay_buf);
+                        tty_bytes_written += replay_buf.len() as u64;
+                    }
                     let _ = std::io::Write::flush(&mut tty_out);
-                    let _ = nix::unistd::write(&pty.master, b"\x0c"); // Ctrl+L
                 }
 
                 // stdin -> inner master (ALWAYS relay, even when snagged).
@@ -200,6 +208,7 @@ pub fn cmd_wrap(capture: &str) -> Result<()> {
                     if !is_snagged {
                         let _ = std::io::Write::write_all(&mut tty_out, data);
                         let _ = std::io::Write::flush(&mut tty_out);
+                        tty_bytes_written += data.len() as u64;
                     }
                     let _ = std::io::Write::write_all(&mut capture_file, data);
                     let _ = std::io::Write::flush(&mut capture_file);
