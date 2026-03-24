@@ -131,11 +131,19 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                         }
                     }
                     DaemonEvent::ClientDisconnected(client_id) => {
-                        // Remove client from any attached sessions
                         if let Some(client) = clients.remove(&client_id) {
                             if let Some(ref session_id) = client.session_id {
                                 if let Some(session) = registry.get_mut(session_id) {
                                     session.attached_clients.retain(|&id| id != client_id);
+                                    // Signal snag wrap to resume if no more attached clients
+                                    if session.registered && session.attached_clients.is_empty() {
+                                        if let Some(pid) = session.child_pid {
+                                            let _ = nix::sys::signal::kill(
+                                                pid,
+                                                nix::sys::signal::Signal::SIGUSR2,
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -538,8 +546,13 @@ fn handle_session_attach(
                     client.read_only = read_only;
                 }
 
-                // Send scrollback. For registered sessions with snag wrap,
-                // the capture file reader already provides all output.
+                // For registered sessions, signal snag wrap to enter snagged mode
+                if session.registered {
+                    if let Some(pid) = session.child_pid {
+                        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGUSR1);
+                    }
+                }
+
                 let scrollback = session.scrollback.all_bytes();
                 let scrollback_str = String::from_utf8_lossy(&scrollback).to_string();
 
@@ -567,6 +580,12 @@ fn handle_session_detach(
         if let Some(ref session_id) = client.session_id.take() {
             if let Some(session) = registry.get_mut(session_id) {
                 session.attached_clients.retain(|&id| id != client_id);
+                // If no more attached clients, signal snag wrap to resume
+                if session.registered && session.attached_clients.is_empty() {
+                    if let Some(pid) = session.child_pid {
+                        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGUSR2);
+                    }
+                }
             }
         }
     }

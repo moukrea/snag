@@ -7,9 +7,17 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static SIGWINCH_RECEIVED: AtomicBool = AtomicBool::new(false);
+static SNAGGED: AtomicBool = AtomicBool::new(false);
+static UNSNAGGED: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn handle_sigwinch(_: nix::libc::c_int) {
     SIGWINCH_RECEIVED.store(true, Ordering::Relaxed);
+}
+extern "C" fn handle_sigusr1(_: nix::libc::c_int) {
+    SNAGGED.store(true, Ordering::Relaxed);
+}
+extern "C" fn handle_sigusr2(_: nix::libc::c_int) {
+    UNSNAGGED.store(true, Ordering::Relaxed);
 }
 
 pub fn cmd_wrap(capture: &str) -> Result<()> {
@@ -76,13 +84,23 @@ pub fn cmd_wrap(capture: &str) -> Result<()> {
             // Put outer terminal in raw mode
             crossterm::terminal::enable_raw_mode()?;
 
-            // Install SIGWINCH handler
+            // Install signal handlers
             unsafe {
                 libc::signal(
                     libc::SIGWINCH,
                     handle_sigwinch as *const () as libc::sighandler_t,
                 );
+                libc::signal(
+                    libc::SIGUSR1,
+                    handle_sigusr1 as *const () as libc::sighandler_t,
+                );
+                libc::signal(
+                    libc::SIGUSR2,
+                    handle_sigusr2 as *const () as libc::sighandler_t,
+                );
             }
+
+            let mut is_snagged = false;
 
             // Set inner PTY master to non-blocking
             let master_fd = pty.master.as_raw_fd();
@@ -141,7 +159,27 @@ pub fn cmd_wrap(capture: &str) -> Result<()> {
                     }
                 }
 
+                // Handle snag/unsnag signals
+                if SNAGGED.swap(false, Ordering::Relaxed) && !is_snagged {
+                    is_snagged = true;
+                    // Clear screen and show message
+                    let msg = "\x1b[2J\x1b[H\x1b[1;33m\
+                        === Session snagged by a remote client ===\r\n\r\n\
+                        \x1b[0mThis session is being controlled remotely.\r\n\
+                        It will resume when the remote client detaches.\r\n";
+                    let _ = std::io::Write::write_all(&mut tty_out, msg.as_bytes());
+                    let _ = std::io::Write::flush(&mut tty_out);
+                }
+                if UNSNAGGED.swap(false, Ordering::Relaxed) && is_snagged {
+                    is_snagged = false;
+                    // Clear screen and redraw (send Ctrl+L to inner shell)
+                    let _ = std::io::Write::write_all(&mut tty_out, b"\x1b[2J\x1b[H");
+                    let _ = std::io::Write::flush(&mut tty_out);
+                    let _ = nix::unistd::write(&pty.master, b"\x0c"); // Ctrl+L
+                }
+
                 // stdin -> inner master (user input to shell)
+                // When snagged, discard local input (remote client has control)
                 if pollfds[0].revents & libc::POLLIN != 0 {
                     let n = unsafe {
                         libc::read(libc::STDIN_FILENO, buf.as_mut_ptr().cast(), buf.len())
@@ -149,18 +187,22 @@ pub fn cmd_wrap(capture: &str) -> Result<()> {
                     if n <= 0 {
                         break;
                     }
-                    let _ = nix::unistd::write(&pty.master, &buf[..n as usize]);
+                    if !is_snagged {
+                        let _ = nix::unistd::write(&pty.master, &buf[..n as usize]);
+                    }
                 }
 
-                // inner master -> stdout + capture file (shell output)
+                // inner master -> capture file (always) + stdout (only when not snagged)
                 if pollfds[1].revents & libc::POLLIN != 0 {
                     let n = unsafe { libc::read(master_fd, buf.as_mut_ptr().cast(), buf.len()) };
                     if n <= 0 {
                         break;
                     }
                     let data = &buf[..n as usize];
-                    let _ = std::io::Write::write_all(&mut tty_out, data);
-                    let _ = std::io::Write::flush(&mut tty_out);
+                    if !is_snagged {
+                        let _ = std::io::Write::write_all(&mut tty_out, data);
+                        let _ = std::io::Write::flush(&mut tty_out);
+                    }
                     let _ = std::io::Write::write_all(&mut capture_file, data);
                     let _ = std::io::Write::flush(&mut capture_file);
                 }
