@@ -84,29 +84,64 @@ pub fn print_session_info_json(info: &SessionInfo) {
     println!("{}", serde_json::to_string_pretty(info).unwrap());
 }
 
-pub fn print_grep(matches: &[GrepMatch]) {
+pub fn print_grep(matches: &[GrepMatch], sessions_only: bool, last: bool) {
     if matches.is_empty() {
         println!("No matches.");
         return;
     }
     for (i, m) in matches.iter().enumerate() {
-        if i > 0 {
+        if i > 0 && !sessions_only {
             println!();
         }
         let label = m
             .session_name
             .as_deref()
             .unwrap_or(&m.session_id[..8.min(m.session_id.len())]);
-        println!("[{label}]");
-        for line in &m.lines {
-            println!("  {line}");
+        if sessions_only {
+            println!("{label}");
+        } else if last {
+            println!("[{label}]");
+            if let Some(line) = m.lines.last() {
+                println!("  {line}");
+            }
+        } else {
+            println!("[{label}]");
+            for line in &m.lines {
+                println!("  {line}");
+            }
         }
     }
 }
 
-pub fn print_grep_json(matches: &[GrepMatch]) {
-    let wrapper = serde_json::json!({ "matches": matches });
-    println!("{}", serde_json::to_string_pretty(&wrapper).unwrap());
+pub fn print_grep_json(matches: &[GrepMatch], sessions_only: bool, last: bool) {
+    if sessions_only {
+        let ids: Vec<_> = matches
+            .iter()
+            .map(|m| {
+                m.session_name
+                    .as_deref()
+                    .unwrap_or(&m.session_id)
+                    .to_string()
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&ids).unwrap());
+    } else if last {
+        let trimmed: Vec<_> = matches
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "session_id": m.session_id,
+                    "session_name": m.session_name,
+                    "match": m.lines.last(),
+                })
+            })
+            .collect();
+        let wrapper = serde_json::json!({ "matches": trimmed });
+        println!("{}", serde_json::to_string_pretty(&wrapper).unwrap());
+    } else {
+        let wrapper = serde_json::json!({ "matches": matches });
+        println!("{}", serde_json::to_string_pretty(&wrapper).unwrap());
+    }
 }
 
 pub fn print_process_list(entries: &[ProcessEntry]) {

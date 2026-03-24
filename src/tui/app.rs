@@ -11,7 +11,7 @@ pub struct App {
     pub sessions: Vec<SessionInfo>,
     pub selected: usize,
     pub should_quit: bool,
-    pub preview_lines: Vec<String>,
+    pub preview_raw: String,
     pub input_mode: InputMode,
     pub input_buffer: String,
 }
@@ -22,7 +22,7 @@ impl App {
             sessions: Vec::new(),
             selected: 0,
             should_quit: false,
-            preview_lines: Vec::new(),
+            preview_raw: String::new(),
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
         }
