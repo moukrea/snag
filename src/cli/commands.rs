@@ -177,8 +177,9 @@ pub fn cmd_wrap(capture: &str) -> Result<()> {
                     let _ = nix::unistd::write(&pty.master, b"\x0c"); // Ctrl+L
                 }
 
-                // stdin -> inner master (user input to shell)
-                // When snagged, discard local input (remote client has control)
+                // stdin -> inner master (ALWAYS relay, even when snagged).
+                // The daemon sends remote input through the original master fd,
+                // which arrives here as stdin. Must relay to inner shell.
                 if pollfds[0].revents & libc::POLLIN != 0 {
                     let n = unsafe {
                         libc::read(libc::STDIN_FILENO, buf.as_mut_ptr().cast(), buf.len())
@@ -186,9 +187,7 @@ pub fn cmd_wrap(capture: &str) -> Result<()> {
                     if n <= 0 {
                         break;
                     }
-                    if !is_snagged {
-                        let _ = nix::unistd::write(&pty.master, &buf[..n as usize]);
-                    }
+                    let _ = nix::unistd::write(&pty.master, &buf[..n as usize]);
                 }
 
                 // inner master -> capture file (always) + stdout (only when not snagged)
