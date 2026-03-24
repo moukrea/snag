@@ -102,6 +102,12 @@ pub enum Command {
     Grep {
         /// Pattern to search for
         pattern: String,
+        /// Only show session IDs/names that match (no details)
+        #[arg(long, short = 's')]
+        sessions_only: bool,
+        /// Show only the last match per session
+        #[arg(long, short = 'l')]
+        last: bool,
         /// Output as JSON
         #[arg(long)]
         json: bool,

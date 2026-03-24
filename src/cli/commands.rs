@@ -80,8 +80,36 @@ pub fn cmd_wrap(capture: &str) -> Result<()> {
                 .open("/dev/tty")
                 .unwrap_or_else(|_| unsafe { std::fs::File::from_raw_fd(libc::STDOUT_FILENO) });
 
-            // Put outer terminal in raw mode
-            crossterm::terminal::enable_raw_mode()?;
+            // Set initial terminal title to the shell name (not "snag")
+            let shell_name = shell.rsplit('/').next().unwrap_or(&shell);
+            let title_seq = format!("\x1b]0;{shell_name}\x07");
+            let _ = std::io::Write::write_all(&mut tty_out, title_seq.as_bytes());
+            let _ = std::io::Write::flush(&mut tty_out);
+
+            // Put outer terminal in raw mode — but use minimal raw mode
+            // (like script does) to preserve mouse tracking and scroll behavior.
+            // crossterm's enable_raw_mode() is too aggressive for a PTY proxy.
+            let saved_termios = nix::sys::termios::tcgetattr(std::io::stdin())?;
+            let mut raw = saved_termios.clone();
+            // Disable echo and canonical mode (input delivered char-by-char)
+            raw.local_flags.remove(
+                nix::sys::termios::LocalFlags::ECHO
+                    | nix::sys::termios::LocalFlags::ICANON
+                    | nix::sys::termios::LocalFlags::ISIG
+                    | nix::sys::termios::LocalFlags::IEXTEN,
+            );
+            // Disable input processing that would mangle data
+            raw.input_flags
+                .remove(nix::sys::termios::InputFlags::ICRNL | nix::sys::termios::InputFlags::IXON);
+            // Keep OPOST enabled — output processing must stay for proper
+            // escape sequence handling by the terminal emulator
+            raw.control_chars[nix::sys::termios::SpecialCharacterIndices::VMIN as usize] = 1;
+            raw.control_chars[nix::sys::termios::SpecialCharacterIndices::VTIME as usize] = 0;
+            nix::sys::termios::tcsetattr(
+                std::io::stdin(),
+                nix::sys::termios::SetArg::TCSANOW,
+                &raw,
+            )?;
 
             // Install signal handlers
             unsafe {
@@ -164,7 +192,8 @@ pub fn cmd_wrap(capture: &str) -> Result<()> {
                     is_snagged = true;
                     // Switch to alternate screen (preserves original screen)
                     // and show snagged message
-                    let msg = "\x1b[?1049h\x1b[H\x1b[1;33m\
+                    // Switch to alternate screen, clear it fully, then show message
+                    let msg = "\x1b[?1049h\x1b[2J\x1b[H\x1b[1;33m\
                         === Session snagged by a remote client ===\r\n\r\n\
                         \x1b[0mThis session is being controlled remotely.\r\n\
                         It will resume when the remote client detaches.\r\n";
@@ -184,6 +213,19 @@ pub fn cmd_wrap(capture: &str) -> Result<()> {
                         tty_bytes_written += replay_buf.len() as u64;
                     }
                     let _ = std::io::Write::flush(&mut tty_out);
+                    // Re-apply current terminal size to the inner PTY so TUIs
+                    // resize back to the original dimensions after detach
+                    if let Ok((cols, rows)) = crossterm::terminal::size() {
+                        let ws = libc::winsize {
+                            ws_row: rows,
+                            ws_col: cols,
+                            ws_xpixel: 0,
+                            ws_ypixel: 0,
+                        };
+                        unsafe {
+                            libc::ioctl(master_fd, libc::TIOCSWINSZ, &ws);
+                        }
+                    }
                 }
 
                 // stdin -> inner master (ALWAYS relay, even when snagged).
@@ -235,7 +277,11 @@ pub fn cmd_wrap(capture: &str) -> Result<()> {
             }
 
             // Restore terminal
-            crossterm::terminal::disable_raw_mode()?;
+            let _ = nix::sys::termios::tcsetattr(
+                std::io::stdin(),
+                nix::sys::termios::SetArg::TCSANOW,
+                &saved_termios,
+            );
 
             // Wait for child and exit with its status
             match nix::sys::wait::waitpid(child, None) {
@@ -672,15 +718,21 @@ pub async fn cmd_ps(config: &Config, target: String) -> Result<()> {
     }
 }
 
-pub async fn cmd_grep(config: &Config, pattern: String, json: bool) -> Result<()> {
+pub async fn cmd_grep(
+    config: &Config,
+    pattern: String,
+    sessions_only: bool,
+    last: bool,
+    json: bool,
+) -> Result<()> {
     let mut client = DaemonClient::connect(config).await?;
     let resp = client.request(&Request::SessionGrep { pattern }).await?;
     match resp {
         Response::Ok(ResponseData::GrepResult(matches)) => {
             if json {
-                output::print_grep_json(&matches);
+                output::print_grep_json(&matches, sessions_only, last);
             } else {
-                output::print_grep(&matches);
+                output::print_grep(&matches, sessions_only, last);
             }
             Ok(())
         }
@@ -701,6 +753,9 @@ pub fn cmd_hook(shell: &str) -> Result<()> {
             print!(
                 r#"_snag_hook() {{
   [ -n "$SNAG_SESSION" ] && return
+  # Auto-start daemon if not running
+  snag daemon status &>/dev/null || snag daemon start &>/dev/null &
+  sleep 0.2
   local _snag_result
   _snag_result="$(snag register --pid $$ 2>/dev/null)"
   if [ $? -eq 0 ] && [ -n "$_snag_result" ]; then
@@ -718,6 +773,9 @@ _snag_hook
             print!(
                 r#"_snag_hook() {{
   [[ -n "$SNAG_SESSION" ]] && return
+  # Auto-start daemon if not running
+  snag daemon status &>/dev/null || snag daemon start &>/dev/null &
+  sleep 0.2
   local _snag_result
   _snag_result="$(snag register --pid $$ 2>/dev/null)"
   if [[ $? -eq 0 ]] && [[ -n "$_snag_result" ]]; then
