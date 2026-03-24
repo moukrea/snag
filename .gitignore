@@ -1,0 +1,5 @@
+/target
+.harness/
+.claude/worktrees/
+.claude/
+.harness/

@@ -1,0 +1,209 @@
+name: Tag Release
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    uses: ./.github/workflows/build.yml
+    with:
+      upload-artifacts: true
+      create-archives: true
+      ref-name: ${{ github.ref_name }}
+
+  create-release:
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Install git-cliff
+        shell: bash
+        run: |
+          GIT_CLIFF_VERSION="2.7.0"
+          curl -sSfL "https://github.com/orhun/git-cliff/releases/download/v${GIT_CLIFF_VERSION}/git-cliff-${GIT_CLIFF_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar xz
+          sudo mv git-cliff-${GIT_CLIFF_VERSION}/git-cliff /usr/local/bin/
+
+      - name: Create GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ github.ref_name }}"
+
+          # Generate changelog for this version using git-cliff
+          CHANGELOG=$(git-cliff --config .github/cliff.toml --latest --strip header)
+
+          # Fallback if changelog is empty
+          if [ -z "$CHANGELOG" ]; then
+            CHANGELOG="Release ${VERSION}"
+          fi
+
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.sha256' -o -name '*.deb' -o -name '*.rpm' \) -exec mv {} artifacts/ \;
+
+          # Use --notes-file to avoid shell quoting issues with multiline changelog
+          echo "$CHANGELOG" > /tmp/release-notes.md
+          gh release create "${VERSION}" \
+            --title "snag ${VERSION}" \
+            --notes-file /tmp/release-notes.md \
+            artifacts/*.tar.gz \
+            artifacts/*.sha256 \
+            artifacts/*.deb \
+            artifacts/*.rpm
+
+      - name: Update Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          VERSION="${{ github.ref_name }}"
+
+          # Compute SHA256 for each tarball
+          SHA_LINUX_X86=$(sha256sum artifacts/snag-${VERSION}-linux-x86_64.tar.gz | cut -d' ' -f1)
+          SHA_LINUX_ARM=$(sha256sum artifacts/snag-${VERSION}-linux-aarch64.tar.gz | cut -d' ' -f1)
+
+          # Clone tap repo
+          git clone https://x-access-token:${GH_TOKEN}@github.com/moukrea/homebrew-tap.git tap
+          cd tap
+
+          # Generate formula
+          cat > Formula/snag.rb << FORMULA
+          class Snag < Formula
+            desc "Local PTY session multiplexer — spawn, discover, attach to, and interact with any shell session"
+            homepage "https://github.com/moukrea/snag"
+            version "${VERSION}"
+            license "MIT"
+
+            on_linux do
+              on_intel do
+                url "https://github.com/moukrea/snag/releases/download/${VERSION}/snag-${VERSION}-linux-x86_64.tar.gz"
+                sha256 "${SHA_LINUX_X86}"
+              end
+              on_arm do
+                url "https://github.com/moukrea/snag/releases/download/${VERSION}/snag-${VERSION}-linux-aarch64.tar.gz"
+                sha256 "${SHA_LINUX_ARM}"
+              end
+            end
+
+            def install
+              bin.install "snag"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/snag --version")
+            end
+          end
+          FORMULA
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/snag.rb
+          git commit -m "snag ${VERSION}"
+          git push origin main
+
+      - name: Update APT repository
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+        run: |
+          VERSION="${{ github.ref_name }}"
+
+          # Import GPG key
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+
+          # Clone APT repo
+          git clone https://x-access-token:${GH_TOKEN}@github.com/moukrea/apt-repo.git apt-repo
+          cd apt-repo
+
+          # Copy .deb files (rename to Debian convention for dpkg-scanpackages --arch)
+          mkdir -p pool/main/s/snag
+          cp ../artifacts/snag-${VERSION}-linux-x86_64.deb pool/main/s/snag/snag_${VERSION}_amd64.deb
+          cp ../artifacts/snag-${VERSION}-linux-aarch64.deb pool/main/s/snag/snag_${VERSION}_arm64.deb
+
+          # Generate architecture-specific package indices
+          mkdir -p dists/stable/main/binary-amd64
+          mkdir -p dists/stable/main/binary-arm64
+          dpkg-scanpackages --arch amd64 pool/ > dists/stable/main/binary-amd64/Packages
+          gzip -k -f dists/stable/main/binary-amd64/Packages
+          dpkg-scanpackages --arch arm64 pool/ > dists/stable/main/binary-arm64/Packages
+          gzip -k -f dists/stable/main/binary-arm64/Packages
+
+          # Generate Release files (remove old signatures first)
+          rm -f dists/stable/Release.gpg dists/stable/InRelease
+          apt-ftparchive release dists/stable/ > dists/stable/Release
+          gpg --batch --pinentry-mode loopback --default-key "$GPG_KEY_ID" -abs -o dists/stable/Release.gpg dists/stable/Release
+          gpg --batch --pinentry-mode loopback --default-key "$GPG_KEY_ID" --clearsign -o dists/stable/InRelease dists/stable/Release
+
+          # Commit and push
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "snag ${VERSION}"
+          git push origin main
+
+      - name: Update RPM repository
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+        run: |
+          VERSION="${{ github.ref_name }}"
+
+          # Import GPG key (may already be imported from APT step)
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import 2>/dev/null || true
+
+          # Install createrepo
+          sudo apt-get update && sudo apt-get install -y createrepo-c
+
+          # Clone RPM repo
+          git clone https://x-access-token:${GH_TOKEN}@github.com/moukrea/rpm-repo.git rpm-repo
+          cd rpm-repo
+
+          # Copy .rpm files
+          mkdir -p x86_64 aarch64
+          cp ../artifacts/snag-${VERSION}-linux-x86_64.rpm x86_64/
+          cp ../artifacts/snag-${VERSION}-linux-aarch64.rpm aarch64/
+
+          # Generate repo metadata (repomd.xml signature provides integrity via checksum chain)
+          createrepo_c --update .
+          rm -f repodata/repomd.xml.asc
+          gpg --batch --pinentry-mode loopback --default-key "$GPG_KEY_ID" --detach-sign --armor repodata/repomd.xml
+
+          # Commit and push
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "snag ${VERSION}"
+          git push origin main
+
+      - name: Generate Arch PKGBUILD
+        run: |
+          VERSION="${{ github.ref_name }}"
+
+          SHA_X86=$(sha256sum artifacts/snag-${VERSION}-linux-x86_64.tar.gz | cut -d' ' -f1)
+          SHA_ARM=$(sha256sum artifacts/snag-${VERSION}-linux-aarch64.tar.gz | cut -d' ' -f1)
+
+          mkdir -p artifacts/arch
+          sed -e "s/VERSION_PLACEHOLDER/${VERSION}/g" \
+              -e "s/SHA256_X86_64_PLACEHOLDER/${SHA_X86}/g" \
+              -e "s/SHA256_AARCH64_PLACEHOLDER/${SHA_ARM}/g" \
+              packaging/arch/PKGBUILD > artifacts/arch/PKGBUILD
+
+          # Upload PKGBUILD to the release
+          gh release upload "${VERSION}" artifacts/arch/PKGBUILD \
+            --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

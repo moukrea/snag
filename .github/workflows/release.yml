@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    if: ${{ !startsWith(github.event.head_commit.message, 'chore(release):') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    if: ${{ !startsWith(github.event.head_commit.message, 'chore(release):') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test
+
+  build:
+    needs: [lint, test]
+    if: ${{ !startsWith(github.event.head_commit.message, 'chore(release):') }}
+    uses: ./.github/workflows/build.yml
+    with:
+      upload-artifacts: true
+      create-archives: false
+
+  version-bump:
+    needs: [lint, test, build]
+    if: ${{ !startsWith(github.event.head_commit.message, 'chore(release):') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN }}
+
+      - name: Install git-cliff
+        shell: bash
+        run: |
+          GIT_CLIFF_VERSION="2.7.0"
+          curl -sSfL "https://github.com/orhun/git-cliff/releases/download/v${GIT_CLIFF_VERSION}/git-cliff-${GIT_CLIFF_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar xz
+          sudo mv git-cliff-${GIT_CLIFF_VERSION}/git-cliff /usr/local/bin/
+
+      - name: Configure git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump version and release
+        shell: bash
+        run: |
+          # Get current version from Cargo.toml
+          CURRENT_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+
+          # Determine next version (bare semver, no v prefix)
+          BUMPED_VERSION=$(git-cliff --config .github/cliff.toml --bumped-version)
+          BUMPED_VERSION="${BUMPED_VERSION#v}"
+
+          # Exit early if no bump needed
+          if [ "$BUMPED_VERSION" = "$CURRENT_VERSION" ]; then
+            echo "No version-bumping commits found, skipping"
+            exit 0
+          fi
+
+          NEW_VERSION="$BUMPED_VERSION"
+          echo "Bumping version: $CURRENT_VERSION -> $NEW_VERSION"
+
+          # Update Cargo.toml
+          sed -i "s/^version = \".*\"/version = \"$NEW_VERSION\"/" Cargo.toml
+
+          # Regenerate Cargo.lock
+          cargo generate-lockfile
+
+          # Generate changelog for this release
+          CHANGELOG=$(git-cliff --config .github/cliff.toml --latest --strip header)
+
+          # Stage changes
+          git add Cargo.toml Cargo.lock
+
+          # Commit (no v prefix)
+          git commit -m "chore(release): bump version to $NEW_VERSION"
+
+          # Create annotated tag with changelog (no v prefix)
+          git tag -a "$NEW_VERSION" -m "Release $NEW_VERSION"
+
+          # Push commit and tag
+          git push origin main --tags

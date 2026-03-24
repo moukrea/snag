@@ -1,0 +1,98 @@
+name: Build
+
+on:
+  workflow_call:
+    inputs:
+      upload-artifacts:
+        type: boolean
+        default: false
+      create-archives:
+        type: boolean
+        default: false
+      ref-name:
+        type: string
+        default: ''
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            os_name: linux
+            arch: x86_64
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            os_name: linux
+            arch: aarch64
+            cross: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cross-compilation packages
+        if: matrix.cross
+        run: |
+          sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross && 'aarch64-linux-gnu-gcc' || '' }}
+
+      - name: Verify binary
+        run: test -f target/${{ matrix.target }}/release/snag
+
+      - name: Create archive
+        if: inputs.create-archives
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/snag dist/
+          cd dist && tar czf snag-${{ inputs.ref-name }}-${{ matrix.os_name }}-${{ matrix.arch }}.tar.gz snag
+
+      - name: Generate checksum
+        if: inputs.create-archives
+        run: |
+          cd dist && sha256sum snag-${{ inputs.ref-name }}-${{ matrix.os_name }}-${{ matrix.arch }}.tar.gz \
+            > snag-${{ inputs.ref-name }}-${{ matrix.os_name }}-${{ matrix.arch }}.tar.gz.sha256
+
+      - name: Build .deb package
+        if: inputs.create-archives
+        run: |
+          cargo install cargo-deb
+          cargo deb --no-build --target ${{ matrix.target }}
+          mkdir -p dist
+          mv target/${{ matrix.target }}/debian/snag_*.deb \
+            dist/snag-${{ inputs.ref-name }}-linux-${{ matrix.arch }}.deb
+
+      - name: Build .rpm package
+        if: inputs.create-archives
+        run: |
+          cargo install cargo-generate-rpm
+          cargo generate-rpm --target ${{ matrix.target }}
+          mv target/${{ matrix.target }}/generate-rpm/snag-*.rpm \
+            dist/snag-${{ inputs.ref-name }}-linux-${{ matrix.arch }}.rpm
+
+      - name: Upload artifact
+        if: inputs.upload-artifacts && !inputs.create-archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: snag-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/snag
+
+      - name: Upload release artifact
+        if: inputs.upload-artifacts && inputs.create-archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: snag-${{ matrix.target }}
+          path: |
+            dist/snag-${{ inputs.ref-name }}-*
