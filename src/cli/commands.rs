@@ -60,8 +60,7 @@ pub fn cmd_wrap(capture: &str) -> Result<()> {
                 let _ = close(slave_raw);
             }
             let shell_cstr = CString::new(shell.as_str()).unwrap();
-            let arg_l = CString::new("-l").unwrap();
-            let _ = execvp(&shell_cstr, &[shell_cstr.clone(), arg_l]);
+            let _ = execvp(&shell_cstr, &[shell_cstr.clone()]);
             unsafe {
                 libc::_exit(127);
             }
