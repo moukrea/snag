@@ -162,8 +162,9 @@ pub fn cmd_wrap(capture: &str) -> Result<()> {
                 // Handle snag/unsnag signals
                 if SNAGGED.swap(false, Ordering::Relaxed) && !is_snagged {
                     is_snagged = true;
-                    // Clear screen and show message
-                    let msg = "\x1b[2J\x1b[H\x1b[1;33m\
+                    // Switch to alternate screen (preserves original screen)
+                    // and show snagged message
+                    let msg = "\x1b[?1049h\x1b[H\x1b[1;33m\
                         === Session snagged by a remote client ===\r\n\r\n\
                         \x1b[0mThis session is being controlled remotely.\r\n\
                         It will resume when the remote client detaches.\r\n";
@@ -172,8 +173,8 @@ pub fn cmd_wrap(capture: &str) -> Result<()> {
                 }
                 if UNSNAGGED.swap(false, Ordering::Relaxed) && is_snagged {
                     is_snagged = false;
-                    // Replay missed output from capture file
-                    let _ = std::io::Write::write_all(&mut tty_out, b"\x1b[2J\x1b[H");
+                    // Restore original screen, then append missed output
+                    let _ = std::io::Write::write_all(&mut tty_out, b"\x1b[?1049l");
                     if let Ok(mut replay) = std::fs::File::open(capture) {
                         use std::io::{Read, Seek, SeekFrom};
                         let _ = replay.seek(SeekFrom::Start(tty_bytes_written));
