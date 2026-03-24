@@ -60,10 +60,10 @@ snag/
 │   ├── daemon/
 │   │   ├── mod.rs           # Daemon module root
 │   │   ├── server.rs        # Unix socket listener, event loop
-│   │   ├── session.rs       # Session struct, spawn, adopt
+│   │   ├── session.rs       # Session struct, spawn, register
 │   │   ├── registry.rs      # Session registry (HashMap + name index)
 │   │   ├── pty.rs           # PTY operations (openpty, fork, ioctl)
-│   │   ├── adopt.rs         # Scan + pidfd_getfd adoption logic
+│   │   ├── adopt.rs         # Scan + pidfd_getfd for shell hook registration
 │   │   └── ringbuf.rs       # Scrollback ring buffer
 │   ├── protocol/
 │   │   ├── mod.rs           # Protocol module root
@@ -83,9 +83,9 @@ snag/
 
 ### Session names
 
-- Alphanumeric with dots, underscores, hyphens: `[a-zA-Z0-9._-]`
+- Alphanumeric with dots, underscores, hyphens, spaces: `[a-zA-Z0-9._- ]`
 - Maximum 64 characters
-- Examples: `dev`, `ci-runner`, `staging.deploy`
+- Examples: `dev`, `ci-runner`, `staging.deploy`, `my project`
 
 ### Error handling
 

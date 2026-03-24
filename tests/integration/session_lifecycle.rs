@@ -321,7 +321,7 @@ fn test_duplicate_session_name() {
 fn test_invalid_session_name() {
     let socket = test_socket_path("invalid-name");
 
-    let output = snag_cmd(&socket, &["new", "--name", "hello world"]);
+    let output = snag_cmd(&socket, &["new", "--name", "foo/bar"]);
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("invalid session name") || stderr.contains("error"));

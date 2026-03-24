@@ -15,9 +15,21 @@ use std::io;
 pub async fn run_tui(config: &Config) -> Result<()> {
     let mut client = DaemonClient::connect(config).await?;
 
-    // Setup terminal
+    // Setup terminal — use /dev/tty to bypass any snag wrap redirect
+    let mut tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .unwrap_or_else(|_| unsafe {
+            use std::os::fd::FromRawFd;
+            std::fs::File::from_raw_fd(1)
+        });
     terminal::enable_raw_mode()?;
-    crossterm::execute!(io::stdout(), crossterm::terminal::EnterAlternateScreen)?;
+    crossterm::execute!(
+        tty,
+        crossterm::terminal::EnterAlternateScreen,
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
+    )?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
@@ -43,8 +55,9 @@ pub async fn run_tui(config: &Config) -> Result<()> {
                 }
             }
         } else {
-            // Periodic refresh
+            // Periodic refresh (sessions + preview)
             let _ = refresh_sessions(&mut client, &mut app).await;
+            let _ = refresh_preview(&mut client, &mut app).await;
         }
 
         if app.should_quit {
@@ -202,7 +215,7 @@ async fn refresh_sessions(client: &mut DaemonClient, app: &mut App) -> Result<()
 }
 
 async fn refresh_preview(client: &mut DaemonClient, app: &mut App) -> Result<()> {
-    app.preview_lines.clear();
+    app.preview_raw.clear();
 
     let Some(session) = app.selected_session() else {
         return Ok(());
@@ -221,7 +234,8 @@ async fn refresh_preview(client: &mut DaemonClient, app: &mut App) -> Result<()>
         .await?;
 
     if let Response::Ok(ResponseData::Output(text)) = resp {
-        app.preview_lines = text.lines().map(|l| l.to_string()).collect();
+        // Store raw text — the UI will parse ANSI styles via ansi-to-tui
+        app.preview_raw = text;
     }
     Ok(())
 }

@@ -41,7 +41,7 @@ impl fmt::Display for SnagError {
             Self::InvalidSessionName(n) => {
                 write!(
                     f,
-                    "invalid session name '{n}': must match [a-zA-Z0-9._-] and be at most 64 characters"
+                    "invalid session name '{n}': must match [a-zA-Z0-9._- ] and be at most 64 characters"
                 )
             }
             Self::DaemonNotRunning => write!(f, "daemon is not running"),

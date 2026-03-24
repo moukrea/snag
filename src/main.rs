@@ -50,9 +50,12 @@ async fn main() {
         }) => cli::commands::cmd_output(&config, target, lines, follow, json).await,
         Some(Command::Cwd { target }) => cli::commands::cmd_cwd(&config, target).await,
         Some(Command::Ps { target }) => cli::commands::cmd_ps(&config, target).await,
-        Some(Command::Grep { pattern, json }) => {
-            cli::commands::cmd_grep(&config, pattern, json).await
-        }
+        Some(Command::Grep {
+            pattern,
+            sessions_only,
+            last,
+            json,
+        }) => cli::commands::cmd_grep(&config, pattern, sessions_only, last, json).await,
         Some(Command::Hook { shell }) => cli::commands::cmd_hook(&shell),
         Some(Command::Register { pid, name }) => {
             cli::commands::cmd_register(&config, pid, name).await

@@ -147,7 +147,7 @@ pub fn validate_session_name(name: &str) -> Result<()> {
     }
     if !name
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' || c == ' ')
     {
         return Err(SnagError::InvalidSessionName(name.to_string()));
     }
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn test_validate_session_name_invalid_chars() {
-        assert!(validate_session_name("hello world").is_err());
+        assert!(validate_session_name("hello world").is_ok()); // spaces allowed
         assert!(validate_session_name("foo/bar").is_err());
         assert!(validate_session_name("foo:bar").is_err());
         assert!(validate_session_name("foo@bar").is_err());
