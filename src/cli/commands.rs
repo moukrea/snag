@@ -80,6 +80,12 @@ pub fn cmd_wrap(capture: &str) -> Result<()> {
                 .open("/dev/tty")
                 .unwrap_or_else(|_| unsafe { std::fs::File::from_raw_fd(libc::STDOUT_FILENO) });
 
+            // Set initial terminal title to the shell name (not "snag")
+            let shell_name = shell.rsplit('/').next().unwrap_or(&shell);
+            let title_seq = format!("\x1b]0;{shell_name}\x07");
+            let _ = std::io::Write::write_all(&mut tty_out, title_seq.as_bytes());
+            let _ = std::io::Write::flush(&mut tty_out);
+
             // Put outer terminal in raw mode — but use minimal raw mode
             // (like script does) to preserve mouse tracking and scroll behavior.
             // crossterm's enable_raw_mode() is too aggressive for a PTY proxy.
@@ -747,6 +753,9 @@ pub fn cmd_hook(shell: &str) -> Result<()> {
             print!(
                 r#"_snag_hook() {{
   [ -n "$SNAG_SESSION" ] && return
+  # Auto-start daemon if not running
+  snag daemon status &>/dev/null || snag daemon start &>/dev/null &
+  sleep 0.2
   local _snag_result
   _snag_result="$(snag register --pid $$ 2>/dev/null)"
   if [ $? -eq 0 ] && [ -n "$_snag_result" ]; then
@@ -764,6 +773,9 @@ _snag_hook
             print!(
                 r#"_snag_hook() {{
   [[ -n "$SNAG_SESSION" ]] && return
+  # Auto-start daemon if not running
+  snag daemon status &>/dev/null || snag daemon start &>/dev/null &
+  sleep 0.2
   local _snag_result
   _snag_result="$(snag register --pid $$ 2>/dev/null)"
   if [[ $? -eq 0 ]] && [[ -n "$_snag_result" ]]; then

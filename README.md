@@ -152,7 +152,7 @@ Or for zsh:
 eval "$(snag hook zsh)"
 ```
 
-This automatically registers every new shell with the snag daemon. When you open a terminal, the shell is registered and its output is captured. When you close the terminal, the session is unregistered cleanly.
+This automatically registers every new shell with the snag daemon. The daemon is started automatically if it isn't running. When you open a terminal, the shell is registered and its output is captured. When you close the terminal, the session is unregistered cleanly.
 
 Once registered, you can interact with the shell from anywhere:
 
@@ -213,7 +213,7 @@ snag output <id> --lines 20
 
 | Command | Description |
 |---------|-------------|
-| `snag daemon start` | Start the daemon (auto-started on first use) |
+| `snag daemon start` | Start the daemon (auto-started by the shell hook) |
 | `snag daemon stop` | Stop the daemon |
 | `snag daemon status` | Show daemon status |
 
