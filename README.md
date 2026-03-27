@@ -113,7 +113,13 @@ The binary is at `target/release/snag`. Copy it somewhere on your `PATH`.
 - Linux (kernel 5.6+ for shell hook registration via `pidfd_getfd`)
 - `kernel.yama.ptrace_scope` set to `0` (required for PTY adoption via `pidfd_getfd`)
 
-Ubuntu and some other distributions set `ptrace_scope=1` by default, which prevents snag from adopting shell sessions. To fix this:
+Ubuntu and some other distributions set `ptrace_scope=1` by default, which prevents snag from adopting shell sessions. Check your current setting:
+
+```bash
+cat /proc/sys/kernel/yama/ptrace_scope
+```
+
+If the value is not `0`, fix it:
 
 ```bash
 # Temporary (until reboot)
