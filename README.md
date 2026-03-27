@@ -111,6 +111,20 @@ The binary is at `target/release/snag`. Copy it somewhere on your `PATH`.
 ### Requirements
 
 - Linux (kernel 5.6+ for shell hook registration via `pidfd_getfd`)
+- `kernel.yama.ptrace_scope` set to `0` (required for PTY adoption via `pidfd_getfd`)
+
+Ubuntu and some other distributions set `ptrace_scope=1` by default, which prevents snag from adopting shell sessions. To fix this:
+
+```bash
+# Temporary (until reboot)
+sudo sysctl kernel.yama.ptrace_scope=0
+
+# Permanent
+echo 'kernel.yama.ptrace_scope=0' | sudo tee /etc/sysctl.d/99-snag-ptrace.conf
+sudo sysctl -p /etc/sysctl.d/99-snag-ptrace.conf
+```
+
+> **Note:** Setting `ptrace_scope=0` allows any process to ptrace other processes owned by the same user. This is the default on many distributions but Ubuntu enables stricter settings. See the [kernel docs](https://www.kernel.org/doc/Documentation/security/Yama.txt) for details.
 
 ## Quick Start
 
@@ -153,6 +167,8 @@ eval "$(snag hook zsh)"
 ```
 
 This automatically registers every new shell with the snag daemon. When you open a terminal, the shell is registered and its output is captured. When you close the terminal, the session is unregistered cleanly.
+
+If `snag list` shows no sessions after adding the hook, check that `kernel.yama.ptrace_scope` is set to `0` (see [Requirements](#requirements)). The hook silently skips registration when PTY adoption is blocked.
 
 Once registered, you can interact with the shell from anywhere:
 
