@@ -1,4 +1,12 @@
 <p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="snag_dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="snag_bright.png">
+    <img alt="snag" src="snag_bright.png" width="400">
+  </picture>
+</p>
+
+<p align="center">
   <strong>Spawn, attach to, and interact with any shell session on your machine.</strong>
 </p>
 
