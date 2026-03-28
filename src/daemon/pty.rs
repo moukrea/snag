@@ -47,6 +47,11 @@ pub fn spawn_shell(shell: &str, cwd: &Path) -> Result<SpawnResult> {
                 let _ = std::env::set_current_dir("/");
             }
 
+            // Ensure terminal environment is set for proper color and feature support.
+            // The daemon may have been started from a non-terminal context.
+            std::env::set_var("TERM", "xterm-256color");
+            std::env::set_var("COLORTERM", "truecolor");
+
             // Exec shell
             let shell_cstr =
                 CString::new(shell).unwrap_or_else(|_| CString::new("/bin/sh").unwrap());
