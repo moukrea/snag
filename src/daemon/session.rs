@@ -32,6 +32,7 @@ pub struct Session {
     pub registered: bool,
     pub capture_path: Option<PathBuf>,
     pub capture_abort: Option<tokio::task::AbortHandle>,
+    pub in_alternate_screen: bool,
 }
 
 impl Session {
@@ -59,6 +60,7 @@ impl Session {
             registered: false,
             capture_path: None,
             capture_abort: None,
+            in_alternate_screen: false,
         }
     }
 
@@ -88,6 +90,7 @@ impl Session {
             registered: true,
             capture_path,
             capture_abort: None,
+            in_alternate_screen: false,
         }
     }
 

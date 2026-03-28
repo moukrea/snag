@@ -168,6 +168,7 @@ mod tests {
             registered: false,
             capture_path: None,
             capture_abort: None,
+            in_alternate_screen: false,
         }
     }
 

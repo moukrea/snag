@@ -153,6 +153,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                     }
                     DaemonEvent::PtyData(session_id, data) => {
                         if let Some(session) = registry.get_mut(&session_id) {
+                            update_alternate_screen_state(session, &data);
                             session.scrollback.write(&data);
                             let attached: Vec<ClientId> = session.attached_clients.clone();
                             let output_frame = encode_response(&Response::PtyOutput(data.clone())).unwrap_or_default();
@@ -657,6 +658,24 @@ fn handle_session_output(
                     };
                 }
 
+                // When in alternate screen (vim, htop, etc.), show a placeholder
+                if session.in_alternate_screen && !follow {
+                    let fg = pty::fg_process(&session.pts_path);
+                    let app_name = fg
+                        .iter()
+                        .find(|(pid, _)| {
+                            session
+                                .child_pid
+                                .map(|cp| *pid != cp.as_raw() as u32)
+                                .unwrap_or(true)
+                        })
+                        .map(|(_, cmd)| cmd.as_str())
+                        .unwrap_or("application");
+                    return Response::Ok(ResponseData::Output(format!(
+                        "[TUI running: {app_name}]"
+                    )));
+                }
+
                 let output = if let Some(n) = lines {
                     session.scrollback.last_n_lines(n as usize)
                 } else {
@@ -1082,4 +1101,35 @@ fn handle_daemon_status(registry: &SessionRegistry, start_time: Instant) -> Resp
         uptime_secs: start_time.elapsed().as_secs(),
         session_count: registry.len(),
     })
+}
+
+/// Scan PTY output for alternate screen buffer transitions.
+/// Tracks ESC[?1049h/l (xterm) and ESC[?47h/l (older terminals).
+fn update_alternate_screen_state(session: &mut Session, data: &[u8]) {
+    // Look for \x1b[?1049h, \x1b[?1049l, \x1b[?47h, \x1b[?47l
+    let len = data.len();
+    let mut i = 0;
+    while i < len {
+        if data[i] == 0x1b && i + 2 < len && data[i + 1] == b'[' && data[i + 2] == b'?' {
+            // Parse the numeric parameter
+            let start = i + 3;
+            let mut j = start;
+            while j < len && data[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j < len && j > start {
+                let param = &data[start..j];
+                if param == b"1049" || param == b"47" {
+                    match data[j] {
+                        b'h' => session.in_alternate_screen = true,
+                        b'l' => session.in_alternate_screen = false,
+                        _ => {}
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
 }
