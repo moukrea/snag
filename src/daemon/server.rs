@@ -547,19 +547,15 @@ fn handle_session_attach(
 ) -> Response {
     match registry.resolve(target) {
         Ok(id) => {
-            if let Some(session) = registry.get_mut(&id) {
-                // Prevent self-attach: check if the client's terminal IS this session's PTY
-                if let Some(peer_pid) = clients.get(&client_id).and_then(|c| c.peer_pid) {
-                    if let Ok(client_tty) = std::fs::read_link(format!("/proc/{peer_pid}/fd/0")) {
-                        if client_tty == session.pts_path {
-                            return Response::Error {
-                                code: 5,
-                                message: "cannot attach a session to itself".to_string(),
-                            };
-                        }
-                    }
-                }
+            // Detect attach loops (including self-attach) before taking mutable borrow
+            if let Some(cycle) = detect_attach_cycle(&id, client_id, registry, clients) {
+                return Response::Error {
+                    code: 5,
+                    message: format!("attach would create a loop: {cycle}"),
+                };
+            }
 
+            if let Some(session) = registry.get_mut(&id) {
                 // Check for existing non-read-only attached client
                 if !read_only {
                     let active_client = session
@@ -1162,6 +1158,67 @@ fn handle_daemon_status(registry: &SessionRegistry, start_time: Instant) -> Resp
         uptime_secs: start_time.elapsed().as_secs(),
         session_count: registry.len(),
     })
+}
+
+/// Detect if attaching client_id to target_session_id would create a cycle.
+/// Returns Some(chain_description) if a cycle is found, None otherwise.
+///
+/// A cycle occurs when the target session's PTY is the terminal of a client
+/// that is attached to a session whose PTY is the terminal of another client...
+/// eventually reaching back to the session that the requesting client is in.
+fn detect_attach_cycle(
+    target_session_id: &str,
+    client_id: ClientId,
+    registry: &SessionRegistry,
+    clients: &HashMap<ClientId, AttachedClient>,
+) -> Option<String> {
+    // Find which session the requesting client is running in
+    let client_tty = clients
+        .get(&client_id)
+        .and_then(|c| c.peer_pid)
+        .and_then(|pid| std::fs::read_link(format!("/proc/{pid}/fd/0")).ok())?;
+
+    let source_session = registry.find_by_pts(&client_tty)?;
+
+    // Walk the attach chain from target_session_id
+    let mut visited = vec![source_session.to_string()];
+    let mut current = target_session_id.to_string();
+
+    loop {
+        if current == source_session {
+            // Cycle detected
+            visited.push(current);
+            return Some(visited.join(" → "));
+        }
+
+        if visited.contains(&current) {
+            break; // Already visited, no cycle back to source
+        }
+        visited.push(current.clone());
+
+        // Find non-read-only clients attached to this session, and which session they're in
+        let session = registry.get(&current)?;
+        let next = session
+            .attached_clients
+            .iter()
+            .filter_map(|&cid| {
+                let c = clients.get(&cid)?;
+                if c.read_only {
+                    return None;
+                }
+                let pid = c.peer_pid?;
+                let tty = std::fs::read_link(format!("/proc/{pid}/fd/0")).ok()?;
+                registry.find_by_pts(&tty).map(|s| s.to_string())
+            })
+            .next();
+
+        match next {
+            Some(next_id) => current = next_id,
+            None => break, // Chain ends, no cycle
+        }
+    }
+
+    None
 }
 
 /// Scan PTY output for alternate screen buffer transitions.
