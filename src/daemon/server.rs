@@ -317,9 +317,11 @@ async fn handle_request(
         }
         Request::SessionList => handle_session_list(registry),
         Request::SessionInfo { target } => handle_session_info(registry, &target),
-        Request::SessionAttach { target, read_only } => {
-            handle_session_attach(registry, clients, client_id, &target, read_only, event_tx)
-        }
+        Request::SessionAttach {
+            target,
+            read_only,
+            force,
+        } => handle_session_attach(registry, clients, client_id, &target, read_only, force, event_tx),
         Request::SessionDetach => handle_session_detach(registry, clients, client_id),
         Request::SessionSend { target, input } => handle_session_send(registry, &target, &input),
         Request::SessionOutput {
@@ -540,6 +542,7 @@ fn handle_session_attach(
     client_id: ClientId,
     target: &str,
     read_only: bool,
+    force: bool,
     _event_tx: &mpsc::Sender<DaemonEvent>,
 ) -> Response {
     match registry.resolve(target) {
@@ -553,6 +556,43 @@ fn handle_session_attach(
                                 code: 5,
                                 message: "cannot attach a session to itself".to_string(),
                             };
+                        }
+                    }
+                }
+
+                // Check for existing non-read-only attached client
+                if !read_only {
+                    let active_client = session
+                        .attached_clients
+                        .iter()
+                        .find(|&&cid| {
+                            clients
+                                .get(&cid)
+                                .map(|c| !c.read_only)
+                                .unwrap_or(false)
+                        })
+                        .copied();
+
+                    if let Some(existing_cid) = active_client {
+                        if !force {
+                            return Response::Error {
+                                code: 10,
+                                message: "session already attached by another client (use --force to steal)".to_string(),
+                            };
+                        }
+                        // Force-steal: notify and detach the existing client
+                        if let Some(evicted) = clients.get(&existing_cid) {
+                            let stolen_msg = Response::SessionEvent {
+                                event: "stolen".to_string(),
+                                session_id: id.clone(),
+                            };
+                            if let Ok(frame) = encode_response(&stolen_msg) {
+                                let _ = evicted.tx.try_send(frame);
+                            }
+                        }
+                        session.attached_clients.retain(|&cid| cid != existing_cid);
+                        if let Some(evicted) = clients.get_mut(&existing_cid) {
+                            evicted.session_id = None;
                         }
                     }
                 }

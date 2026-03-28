@@ -403,7 +403,7 @@ pub async fn cmd_info(config: &Config, target: String, json: bool) -> Result<()>
     }
 }
 
-pub async fn cmd_attach(config: &Config, target: String, read_only: bool) -> Result<()> {
+pub async fn cmd_attach(config: &Config, target: String, read_only: bool, force: bool) -> Result<()> {
     use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
     use crossterm::terminal;
     use futures_lite::StreamExt;
@@ -415,6 +415,7 @@ pub async fn cmd_attach(config: &Config, target: String, read_only: bool) -> Res
         .request(&Request::SessionAttach {
             target: target.clone(),
             read_only,
+            force,
         })
         .await?;
 
@@ -471,10 +472,17 @@ pub async fn cmd_attach(config: &Config, target: String, read_only: bool) -> Res
                             let _ = std::io::Write::write_all(&mut tty_out, &payload);
                             let _ = std::io::Write::flush(&mut tty_out);
                         } else if msg_type == MSG_SESSION_EVENT {
-                            let _ = std::io::Write::write_all(
-                                &mut tty_out,
-                                b"\r\n\x1b[33m[Session killed by snag]\x1b[0m\r\n",
-                            );
+                            let msg = if let Ok(resp) = decode_response(msg_type, &payload) {
+                                match resp {
+                                    Response::SessionEvent { event, .. } if event == "stolen" => {
+                                        "\r\n\x1b[33m[Session stolen by another client]\x1b[0m\r\n"
+                                    }
+                                    _ => "\r\n\x1b[33m[Session killed by snag]\x1b[0m\r\n",
+                                }
+                            } else {
+                                "\r\n\x1b[33m[Session ended]\x1b[0m\r\n"
+                            };
+                            let _ = std::io::Write::write_all(&mut tty_out, msg.as_bytes());
                             let _ = std::io::Write::flush(&mut tty_out);
                             break Ok(());
                         }

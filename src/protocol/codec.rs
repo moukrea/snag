@@ -164,14 +164,20 @@ mod tests {
         let req = Request::SessionAttach {
             target: "abc123".to_string(),
             read_only: true,
+            force: false,
         };
         let frame = encode_request(&req).unwrap();
         assert_eq!(frame[0], MSG_SESSION_ATTACH);
         let decoded = decode_request(frame[0], &frame[5..]).unwrap();
         match decoded {
-            Request::SessionAttach { target, read_only } => {
+            Request::SessionAttach {
+                target,
+                read_only,
+                force,
+            } => {
                 assert_eq!(target, "abc123");
                 assert!(read_only);
+                assert!(!force);
             }
             _ => panic!("wrong request type"),
         }

@@ -95,7 +95,7 @@ async fn handle_normal_key(
             if let Some(id) = app.selected_id() {
                 // Exit TUI, attach to session
                 cleanup_terminal(terminal)?;
-                crate::cli::commands::cmd_attach(config, id, false).await?;
+                crate::cli::commands::cmd_attach(config, id, false, false).await?;
                 // Re-enter TUI after detach
                 terminal::enable_raw_mode()?;
                 crossterm::execute!(io::stdout(), crossterm::terminal::EnterAlternateScreen)?;

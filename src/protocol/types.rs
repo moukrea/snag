@@ -45,6 +45,8 @@ pub enum Request {
     SessionAttach {
         target: String,
         read_only: bool,
+        #[serde(default)]
+        force: bool,
     },
     SessionDetach,
     SessionSend {

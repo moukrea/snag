@@ -36,9 +36,11 @@ async fn main() {
         Some(Command::Info { target, json }) => {
             cli::commands::cmd_info(&config, target, json).await
         }
-        Some(Command::Attach { target, read_only }) => {
-            cli::commands::cmd_attach(&config, target, read_only).await
-        }
+        Some(Command::Attach {
+            target,
+            read_only,
+            force,
+        }) => cli::commands::cmd_attach(&config, target, read_only, force).await,
         Some(Command::Send { target, command }) => {
             cli::commands::cmd_send(&config, target, command).await
         }
