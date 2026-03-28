@@ -33,6 +33,7 @@ struct AttachedClient {
     read_only: bool,
     session_id: Option<String>,
     peer_pid: Option<u32>,
+    last_size: Option<(u16, u16)>, // (cols, rows)
 }
 
 pub async fn run_daemon(config: Config) -> Result<()> {
@@ -109,6 +110,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                             read_only: false,
                             session_id: None,
                             peer_pid,
+                            last_size: None,
                         });
                         let event_tx = event_tx.clone();
                         tokio::spawn(handle_client_connection(client_id, stream, rx, event_tx));
@@ -596,10 +598,26 @@ fn handle_session_detach(
         if let Some(ref session_id) = client.session_id.take() {
             if let Some(session) = registry.get_mut(session_id) {
                 session.attached_clients.retain(|&id| id != client_id);
-                // If no more attached clients, signal snag wrap to resume
-                if session.registered && session.attached_clients.is_empty() {
-                    if let Some(pid) = session.child_pid {
-                        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGUSR2);
+                if session.attached_clients.is_empty() {
+                    // No more clients — signal snag wrap to resume and re-apply terminal size
+                    if session.registered {
+                        if let Some(pid) = session.child_pid {
+                            let _ =
+                                nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGUSR2);
+                        }
+                    }
+                } else {
+                    // Remaining clients exist — apply a remaining client's terminal size
+                    // so the session PTY matches the active viewer's dimensions
+                    let remaining_size = session
+                        .attached_clients
+                        .iter()
+                        .filter_map(|cid| {
+                            clients.get(cid).and_then(|c| c.last_size)
+                        })
+                        .next();
+                    if let Some((cols, rows)) = remaining_size {
+                        let _ = pty::set_winsize(session.raw_fd(), rows, cols);
                     }
                 }
             }
@@ -1051,11 +1069,14 @@ fn capture_dir() -> PathBuf {
 
 fn handle_resize(
     registry: &mut SessionRegistry,
-    clients: &HashMap<ClientId, AttachedClient>,
+    clients: &mut HashMap<ClientId, AttachedClient>,
     client_id: ClientId,
     cols: u16,
     rows: u16,
 ) -> Response {
+    if let Some(client) = clients.get_mut(&client_id) {
+        client.last_size = Some((cols, rows));
+    }
     let session_id = clients.get(&client_id).and_then(|c| c.session_id.clone());
 
     if let Some(id) = session_id {
