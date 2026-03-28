@@ -32,6 +32,7 @@ struct AttachedClient {
     tx: mpsc::Sender<Vec<u8>>,
     read_only: bool,
     session_id: Option<String>,
+    peer_pid: Option<u32>,
 }
 
 pub async fn run_daemon(config: Config) -> Result<()> {
@@ -101,11 +102,13 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                 match event {
                     DaemonEvent::NewConnection(stream) => {
                         let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
+                        let peer_pid = stream.peer_cred().ok().and_then(|c| c.pid().map(|p| p as u32));
                         let (tx, rx) = mpsc::channel(64);
                         clients.insert(client_id, AttachedClient {
                             tx,
                             read_only: false,
                             session_id: None,
+                            peer_pid,
                         });
                         let event_tx = event_tx.clone();
                         tokio::spawn(handle_client_connection(client_id, stream, rx, event_tx));
@@ -539,6 +542,18 @@ fn handle_session_attach(
     match registry.resolve(target) {
         Ok(id) => {
             if let Some(session) = registry.get_mut(&id) {
+                // Prevent self-attach: check if the client's terminal IS this session's PTY
+                if let Some(peer_pid) = clients.get(&client_id).and_then(|c| c.peer_pid) {
+                    if let Ok(client_tty) = std::fs::read_link(format!("/proc/{peer_pid}/fd/0")) {
+                        if client_tty == session.pts_path {
+                            return Response::Error {
+                                code: 5,
+                                message: "cannot attach a session to itself".to_string(),
+                            };
+                        }
+                    }
+                }
+
                 session.attached_clients.push(client_id);
 
                 if let Some(client) = clients.get_mut(&client_id) {
