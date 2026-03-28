@@ -471,6 +471,11 @@ pub async fn cmd_attach(config: &Config, target: String, read_only: bool) -> Res
                             let _ = std::io::Write::write_all(&mut tty_out, &payload);
                             let _ = std::io::Write::flush(&mut tty_out);
                         } else if msg_type == MSG_SESSION_EVENT {
+                            let _ = std::io::Write::write_all(
+                                &mut tty_out,
+                                b"\r\n\x1b[33m[Session killed by snag]\x1b[0m\r\n",
+                            );
+                            let _ = std::io::Write::flush(&mut tty_out);
                             break Ok(());
                         }
                         // MSG_OK/MSG_ERROR from control messages — ignore

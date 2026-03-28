@@ -477,12 +477,12 @@ fn handle_session_kill(registry: &mut SessionRegistry, target: &str) -> Response
             }
 
             if let Some(session) = registry.remove(&id) {
-                // For registered sessions, just drop the fd — don't kill the shell.
-                // The shell continues running in the original terminal.
-                if !session.registered {
-                    if let Some(pid) = session.child_pid {
-                        pty::kill_session(pid);
-                    }
+                if session.registered {
+                    // Write notification to the wrapped session's terminal
+                    let msg = b"\r\n\x1b[33m[Session unregistered by snag]\x1b[0m\r\n";
+                    let _ = nix::unistd::write(&session.master_fd, msg);
+                } else if let Some(pid) = session.child_pid {
+                    pty::kill_session(pid);
                 }
                 Response::Ok(ResponseData::Empty)
             } else {
