@@ -409,7 +409,12 @@ pub async fn cmd_info(config: &Config, target: String, json: bool) -> Result<()>
     }
 }
 
-pub async fn cmd_attach(config: &Config, target: String, read_only: bool, force: bool) -> Result<()> {
+pub async fn cmd_attach(
+    config: &Config,
+    target: String,
+    read_only: bool,
+    force: bool,
+) -> Result<()> {
     use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
     use crossterm::terminal;
     use futures_lite::StreamExt;

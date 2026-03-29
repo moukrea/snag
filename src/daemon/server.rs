@@ -321,7 +321,9 @@ async fn handle_request(
             target,
             read_only,
             force,
-        } => handle_session_attach(registry, clients, client_id, &target, read_only, force, event_tx),
+        } => handle_session_attach(
+            registry, clients, client_id, &target, read_only, force, event_tx,
+        ),
         Request::SessionDetach => handle_session_detach(registry, clients, client_id),
         Request::SessionSend { target, input } => handle_session_send(registry, &target, &input),
         Request::SessionOutput {
@@ -593,12 +595,7 @@ fn handle_session_attach(
                     let active_client = session
                         .attached_clients
                         .iter()
-                        .find(|&&cid| {
-                            clients
-                                .get(&cid)
-                                .map(|c| !c.read_only)
-                                .unwrap_or(false)
-                        })
+                        .find(|&&cid| clients.get(&cid).map(|c| !c.read_only).unwrap_or(false))
                         .copied();
 
                     if let Some(existing_cid) = active_client {
@@ -670,8 +667,7 @@ fn handle_session_detach(
                     // No more clients — signal snag wrap to resume and re-apply terminal size
                     if session.registered {
                         if let Some(pid) = session.child_pid {
-                            let _ =
-                                nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGUSR2);
+                            let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGUSR2);
                         }
                     }
                 } else {
@@ -680,9 +676,7 @@ fn handle_session_detach(
                     let remaining_size = session
                         .attached_clients
                         .iter()
-                        .filter_map(|cid| {
-                            clients.get(cid).and_then(|c| c.last_size)
-                        })
+                        .filter_map(|cid| clients.get(cid).and_then(|c| c.last_size))
                         .next();
                     if let Some((cols, rows)) = remaining_size {
                         let _ = pty::set_winsize(session.raw_fd(), rows, cols);

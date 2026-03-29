@@ -118,7 +118,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // Status bar
     let status_text = match app.input_mode {
         InputMode::Normal => {
-            let hide_label = if app.hide_snagged { "[h]show snagged" } else { "[h]hide snagged" };
+            let hide_label = if app.hide_snagged {
+                "[h]show snagged"
+            } else {
+                "[h]hide snagged"
+            };
             format!(" [n]ew [x]kill [r]ename [s]end [Enter]attach {hide_label} [q]uit")
         }
         InputMode::Rename => {
