@@ -14,6 +14,7 @@ pub struct App {
     pub preview_raw: String,
     pub input_mode: InputMode,
     pub input_buffer: String,
+    pub hide_snagged: bool,
 }
 
 impl App {
@@ -25,30 +26,47 @@ impl App {
             preview_raw: String::new(),
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
+            hide_snagged: false,
         }
     }
 
+    /// Returns the filtered list of sessions based on hide_snagged toggle.
+    pub fn visible_sessions(&self) -> Vec<&SessionInfo> {
+        self.sessions
+            .iter()
+            .filter(|s| !self.hide_snagged || s.snagged_by.is_none())
+            .collect()
+    }
+
     pub fn select_next(&mut self) {
-        if !self.sessions.is_empty() {
-            self.selected = (self.selected + 1) % self.sessions.len();
+        let count = self.visible_sessions().len();
+        if count > 0 {
+            self.selected = (self.selected + 1) % count;
         }
     }
 
     pub fn select_prev(&mut self) {
-        if !self.sessions.is_empty() {
-            self.selected = self
-                .selected
-                .checked_sub(1)
-                .unwrap_or(self.sessions.len() - 1);
+        let count = self.visible_sessions().len();
+        if count > 0 {
+            self.selected = self.selected.checked_sub(1).unwrap_or(count - 1);
         }
     }
 
     pub fn selected_session(&self) -> Option<&SessionInfo> {
-        self.sessions.get(self.selected)
+        let visible = self.visible_sessions();
+        visible.get(self.selected).copied()
     }
 
     pub fn selected_id(&self) -> Option<String> {
         self.selected_session().map(|s| s.id.clone())
+    }
+
+    pub fn toggle_hide_snagged(&mut self) {
+        self.hide_snagged = !self.hide_snagged;
+        let count = self.visible_sessions().len();
+        if self.selected >= count && count > 0 {
+            self.selected = count - 1;
+        }
     }
 
     pub fn enter_input_mode(&mut self, mode: InputMode) {

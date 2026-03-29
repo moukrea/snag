@@ -315,7 +315,7 @@ async fn handle_request(
         Request::SessionRename { target, new_name } => {
             handle_session_rename(registry, &target, new_name)
         }
-        Request::SessionList => handle_session_list(registry),
+        Request::SessionList => handle_session_list(registry, clients),
         Request::SessionInfo { target } => handle_session_info(registry, &target),
         Request::SessionAttach {
             target,
@@ -521,8 +521,40 @@ fn handle_session_rename(
     }
 }
 
-fn handle_session_list(registry: &SessionRegistry) -> Response {
-    let sessions: Vec<_> = registry.iter().map(|s| s.to_info()).collect();
+fn handle_session_list(
+    registry: &SessionRegistry,
+    clients: &HashMap<ClientId, AttachedClient>,
+) -> Response {
+    let sessions: Vec<_> = registry
+        .iter()
+        .map(|s| {
+            let mut info = s.to_info();
+            // Find which session the active attacher is coming from
+            if !s.attached_clients.is_empty() {
+                let snagged_by = s
+                    .attached_clients
+                    .iter()
+                    .filter_map(|&cid| {
+                        let client = clients.get(&cid)?;
+                        if client.read_only {
+                            return None;
+                        }
+                        let pid = client.peer_pid?;
+                        let tty = std::fs::read_link(format!("/proc/{pid}/fd/0")).ok()?;
+                        let src_id = registry.find_by_pts(&tty)?;
+                        let src = registry.get(src_id)?;
+                        Some(
+                            src.name
+                                .clone()
+                                .unwrap_or_else(|| src.id[..8.min(src.id.len())].to_string()),
+                        )
+                    })
+                    .next();
+                info.snagged_by = snagged_by;
+            }
+            info
+        })
+        .collect();
     Response::Ok(ResponseData::SessionList(sessions))
 }
 

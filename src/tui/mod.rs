@@ -135,6 +135,9 @@ async fn handle_normal_key(
                 app.enter_input_mode(InputMode::Send);
             }
         }
+        KeyCode::Char('h') => {
+            app.toggle_hide_snagged();
+        }
         _ => {}
     }
     Ok(())

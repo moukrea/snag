@@ -130,6 +130,7 @@ impl Session {
             attached: self.attached_clients.len(),
             registered: self.registered,
             created_at: self.created_at_utc.clone(),
+            snagged_by: None,
         }
     }
 

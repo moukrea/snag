@@ -382,6 +382,7 @@ mod tests {
             attached: 1,
             registered: false,
             created_at: "2026-03-22T10:00:00Z".to_string(),
+            snagged_by: None,
         }]));
         let frame = encode_response(&resp).unwrap();
         let decoded = decode_response(frame[0], &frame[5..]).unwrap();
