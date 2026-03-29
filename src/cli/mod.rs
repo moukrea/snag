@@ -66,6 +66,9 @@ pub enum Command {
         /// Read-only mode
         #[arg(long)]
         read_only: bool,
+        /// Force-steal from another attached client
+        #[arg(long)]
+        force: bool,
     },
     /// Send a command to a session
     Send {

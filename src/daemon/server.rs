@@ -32,6 +32,8 @@ struct AttachedClient {
     tx: mpsc::Sender<Vec<u8>>,
     read_only: bool,
     session_id: Option<String>,
+    peer_pid: Option<u32>,
+    last_size: Option<(u16, u16)>, // (cols, rows)
 }
 
 pub async fn run_daemon(config: Config) -> Result<()> {
@@ -101,11 +103,14 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                 match event {
                     DaemonEvent::NewConnection(stream) => {
                         let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
+                        let peer_pid = stream.peer_cred().ok().and_then(|c| c.pid().map(|p| p as u32));
                         let (tx, rx) = mpsc::channel(64);
                         clients.insert(client_id, AttachedClient {
                             tx,
                             read_only: false,
                             session_id: None,
+                            peer_pid,
+                            last_size: None,
                         });
                         let event_tx = event_tx.clone();
                         tokio::spawn(handle_client_connection(client_id, stream, rx, event_tx));
@@ -150,6 +155,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                     }
                     DaemonEvent::PtyData(session_id, data) => {
                         if let Some(session) = registry.get_mut(&session_id) {
+                            update_alternate_screen_state(session, &data);
                             session.scrollback.write(&data);
                             let attached: Vec<ClientId> = session.attached_clients.clone();
                             let output_frame = encode_response(&Response::PtyOutput(data.clone())).unwrap_or_default();
@@ -309,11 +315,15 @@ async fn handle_request(
         Request::SessionRename { target, new_name } => {
             handle_session_rename(registry, &target, new_name)
         }
-        Request::SessionList => handle_session_list(registry),
+        Request::SessionList => handle_session_list(registry, clients),
         Request::SessionInfo { target } => handle_session_info(registry, &target),
-        Request::SessionAttach { target, read_only } => {
-            handle_session_attach(registry, clients, client_id, &target, read_only, event_tx)
-        }
+        Request::SessionAttach {
+            target,
+            read_only,
+            force,
+        } => handle_session_attach(
+            registry, clients, client_id, &target, read_only, force, event_tx,
+        ),
         Request::SessionDetach => handle_session_detach(registry, clients, client_id),
         Request::SessionSend { target, input } => handle_session_send(registry, &target, &input),
         Request::SessionOutput {
@@ -471,12 +481,12 @@ fn handle_session_kill(registry: &mut SessionRegistry, target: &str) -> Response
             }
 
             if let Some(session) = registry.remove(&id) {
-                // For registered sessions, just drop the fd — don't kill the shell.
-                // The shell continues running in the original terminal.
-                if !session.registered {
-                    if let Some(pid) = session.child_pid {
-                        pty::kill_session(pid);
-                    }
+                if session.registered {
+                    // Write notification to the wrapped session's terminal
+                    let msg = b"\r\n\x1b[33m[Session unregistered by snag]\x1b[0m\r\n";
+                    let _ = nix::unistd::write(&session.master_fd, msg);
+                } else if let Some(pid) = session.child_pid {
+                    pty::kill_session(pid);
                 }
                 Response::Ok(ResponseData::Empty)
             } else {
@@ -513,8 +523,40 @@ fn handle_session_rename(
     }
 }
 
-fn handle_session_list(registry: &SessionRegistry) -> Response {
-    let sessions: Vec<_> = registry.iter().map(|s| s.to_info()).collect();
+fn handle_session_list(
+    registry: &SessionRegistry,
+    clients: &HashMap<ClientId, AttachedClient>,
+) -> Response {
+    let sessions: Vec<_> = registry
+        .iter()
+        .map(|s| {
+            let mut info = s.to_info();
+            // Find which session the active attacher is coming from
+            if !s.attached_clients.is_empty() {
+                let snagged_by = s
+                    .attached_clients
+                    .iter()
+                    .filter_map(|&cid| {
+                        let client = clients.get(&cid)?;
+                        if client.read_only {
+                            return None;
+                        }
+                        let pid = client.peer_pid?;
+                        let tty = std::fs::read_link(format!("/proc/{pid}/fd/0")).ok()?;
+                        let src_id = registry.find_by_pts(&tty)?;
+                        let src = registry.get(src_id)?;
+                        Some(
+                            src.name
+                                .clone()
+                                .unwrap_or_else(|| src.id[..8.min(src.id.len())].to_string()),
+                        )
+                    })
+                    .next();
+                info.snagged_by = snagged_by;
+            }
+            info
+        })
+        .collect();
     Response::Ok(ResponseData::SessionList(sessions))
 }
 
@@ -534,11 +576,52 @@ fn handle_session_attach(
     client_id: ClientId,
     target: &str,
     read_only: bool,
+    force: bool,
     _event_tx: &mpsc::Sender<DaemonEvent>,
 ) -> Response {
     match registry.resolve(target) {
         Ok(id) => {
+            // Detect attach loops (including self-attach) before taking mutable borrow
+            if let Some(cycle) = detect_attach_cycle(&id, client_id, registry, clients) {
+                return Response::Error {
+                    code: 5,
+                    message: format!("attach would create a loop: {cycle}"),
+                };
+            }
+
             if let Some(session) = registry.get_mut(&id) {
+                // Check for existing non-read-only attached client
+                if !read_only {
+                    let active_client = session
+                        .attached_clients
+                        .iter()
+                        .find(|&&cid| clients.get(&cid).map(|c| !c.read_only).unwrap_or(false))
+                        .copied();
+
+                    if let Some(existing_cid) = active_client {
+                        if !force {
+                            return Response::Error {
+                                code: 10,
+                                message: "session already attached by another client (use --force to steal)".to_string(),
+                            };
+                        }
+                        // Force-steal: notify and detach the existing client
+                        if let Some(evicted) = clients.get(&existing_cid) {
+                            let stolen_msg = Response::SessionEvent {
+                                event: "stolen".to_string(),
+                                session_id: id.clone(),
+                            };
+                            if let Ok(frame) = encode_response(&stolen_msg) {
+                                let _ = evicted.tx.try_send(frame);
+                            }
+                        }
+                        session.attached_clients.retain(|&cid| cid != existing_cid);
+                        if let Some(evicted) = clients.get_mut(&existing_cid) {
+                            evicted.session_id = None;
+                        }
+                    }
+                }
+
                 session.attached_clients.push(client_id);
 
                 if let Some(client) = clients.get_mut(&client_id) {
@@ -580,10 +663,23 @@ fn handle_session_detach(
         if let Some(ref session_id) = client.session_id.take() {
             if let Some(session) = registry.get_mut(session_id) {
                 session.attached_clients.retain(|&id| id != client_id);
-                // If no more attached clients, signal snag wrap to resume
-                if session.registered && session.attached_clients.is_empty() {
-                    if let Some(pid) = session.child_pid {
-                        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGUSR2);
+                if session.attached_clients.is_empty() {
+                    // No more clients — signal snag wrap to resume and re-apply terminal size
+                    if session.registered {
+                        if let Some(pid) = session.child_pid {
+                            let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGUSR2);
+                        }
+                    }
+                } else {
+                    // Remaining clients exist — apply a remaining client's terminal size
+                    // so the session PTY matches the active viewer's dimensions
+                    let remaining_size = session
+                        .attached_clients
+                        .iter()
+                        .filter_map(|cid| clients.get(cid).and_then(|c| c.last_size))
+                        .next();
+                    if let Some((cols, rows)) = remaining_size {
+                        let _ = pty::set_winsize(session.raw_fd(), rows, cols);
                     }
                 }
             }
@@ -640,6 +736,24 @@ fn handle_session_output(
                                   process substitution (requires bash or zsh)"
                             .to_string(),
                     };
+                }
+
+                // When in alternate screen (vim, htop, etc.), show a placeholder
+                if session.in_alternate_screen && !follow {
+                    let fg = pty::fg_process(&session.pts_path);
+                    let app_name = fg
+                        .iter()
+                        .find(|(pid, _)| {
+                            session
+                                .child_pid
+                                .map(|cp| *pid != cp.as_raw() as u32)
+                                .unwrap_or(true)
+                        })
+                        .map(|(_, cmd)| cmd.as_str())
+                        .unwrap_or("application");
+                    return Response::Ok(ResponseData::Output(format!(
+                        "[TUI running: {app_name}]"
+                    )));
                 }
 
                 let output = if let Some(n) = lines {
@@ -1017,11 +1131,14 @@ fn capture_dir() -> PathBuf {
 
 fn handle_resize(
     registry: &mut SessionRegistry,
-    clients: &HashMap<ClientId, AttachedClient>,
+    clients: &mut HashMap<ClientId, AttachedClient>,
     client_id: ClientId,
     cols: u16,
     rows: u16,
 ) -> Response {
+    if let Some(client) = clients.get_mut(&client_id) {
+        client.last_size = Some((cols, rows));
+    }
     let session_id = clients.get(&client_id).and_then(|c| c.session_id.clone());
 
     if let Some(id) = session_id {
@@ -1067,4 +1184,96 @@ fn handle_daemon_status(registry: &SessionRegistry, start_time: Instant) -> Resp
         uptime_secs: start_time.elapsed().as_secs(),
         session_count: registry.len(),
     })
+}
+
+/// Detect if attaching client_id to target_session_id would create a cycle.
+/// Returns Some(chain_description) if a cycle is found, None otherwise.
+///
+/// A cycle occurs when the target session's PTY is the terminal of a client
+/// that is attached to a session whose PTY is the terminal of another client...
+/// eventually reaching back to the session that the requesting client is in.
+fn detect_attach_cycle(
+    target_session_id: &str,
+    client_id: ClientId,
+    registry: &SessionRegistry,
+    clients: &HashMap<ClientId, AttachedClient>,
+) -> Option<String> {
+    // Find which session the requesting client is running in
+    let client_tty = clients
+        .get(&client_id)
+        .and_then(|c| c.peer_pid)
+        .and_then(|pid| std::fs::read_link(format!("/proc/{pid}/fd/0")).ok())?;
+
+    let source_session = registry.find_by_pts(&client_tty)?;
+
+    // Walk the attach chain from target_session_id
+    let mut visited = vec![source_session.to_string()];
+    let mut current = target_session_id.to_string();
+
+    loop {
+        if current == source_session {
+            // Cycle detected
+            visited.push(current);
+            return Some(visited.join(" → "));
+        }
+
+        if visited.contains(&current) {
+            break; // Already visited, no cycle back to source
+        }
+        visited.push(current.clone());
+
+        // Find non-read-only clients attached to this session, and which session they're in
+        let session = registry.get(&current)?;
+        let next = session
+            .attached_clients
+            .iter()
+            .filter_map(|&cid| {
+                let c = clients.get(&cid)?;
+                if c.read_only {
+                    return None;
+                }
+                let pid = c.peer_pid?;
+                let tty = std::fs::read_link(format!("/proc/{pid}/fd/0")).ok()?;
+                registry.find_by_pts(&tty).map(|s| s.to_string())
+            })
+            .next();
+
+        match next {
+            Some(next_id) => current = next_id,
+            None => break, // Chain ends, no cycle
+        }
+    }
+
+    None
+}
+
+/// Scan PTY output for alternate screen buffer transitions.
+/// Tracks ESC[?1049h/l (xterm) and ESC[?47h/l (older terminals).
+fn update_alternate_screen_state(session: &mut Session, data: &[u8]) {
+    // Look for \x1b[?1049h, \x1b[?1049l, \x1b[?47h, \x1b[?47l
+    let len = data.len();
+    let mut i = 0;
+    while i < len {
+        if data[i] == 0x1b && i + 2 < len && data[i + 1] == b'[' && data[i + 2] == b'?' {
+            // Parse the numeric parameter
+            let start = i + 3;
+            let mut j = start;
+            while j < len && data[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j < len && j > start {
+                let param = &data[start..j];
+                if param == b"1049" || param == b"47" {
+                    match data[j] {
+                        b'h' => session.in_alternate_screen = true,
+                        b'l' => session.in_alternate_screen = false,
+                        _ => {}
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
 }

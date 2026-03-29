@@ -97,8 +97,24 @@ fn get_pts_number_for_fd(pid: u32, fd: i32) -> Option<u32> {
         }
     }
 
-    // Fallback: try to figure out from /proc/<pid>/fd/<fd> -> /dev/pts/<N> mapping
-    // by checking all processes for matching tty
+    // Fallback: try to resolve via /proc/<pid>/fd/<fd> -> /dev/pts/<N> symlink.
+    // Some PTY masters (e.g., opened via /dev/pts/ptmx) have a sibling slave fd
+    // pointing to /dev/pts/<N>. Scan adjacent fds for one linked to /dev/pts/<N>.
+    let fd_dir = format!("/proc/{pid}/fd");
+    if let Ok(entries) = std::fs::read_dir(&fd_dir) {
+        for entry in entries.flatten() {
+            if let Ok(target) = std::fs::read_link(entry.path()) {
+                let s = target.to_string_lossy();
+                if let Some(rest) = s.strip_prefix("/dev/pts/") {
+                    if rest != "ptmx" {
+                        if let Ok(n) = rest.parse::<u32>() {
+                            return Some(n);
+                        }
+                    }
+                }
+            }
+        }
+    }
     None
 }
 

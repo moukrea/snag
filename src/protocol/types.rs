@@ -45,6 +45,8 @@ pub enum Request {
     SessionAttach {
         target: String,
         read_only: bool,
+        #[serde(default)]
+        force: bool,
     },
     SessionDetach,
     SessionSend {
@@ -131,6 +133,8 @@ pub struct SessionInfo {
     pub attached: usize,
     pub registered: bool,
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snagged_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

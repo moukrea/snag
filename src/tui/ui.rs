@@ -16,9 +16,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
         ])
         .split(frame.area());
 
-    // Session list
-    let items: Vec<ListItem> = app
-        .sessions
+    // Session list (filtered by hide_snagged toggle)
+    let visible = app.visible_sessions();
+    let items: Vec<ListItem> = visible
         .iter()
         .enumerate()
         .map(|(i, s)| {
@@ -29,11 +29,18 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
             let marker = if i == app.selected { "▸ " } else { "  " };
             let type_marker = if s.registered { " [R]" } else { "" };
+            let snagged = s
+                .snagged_by
+                .as_deref()
+                .map(|by| format!(" ← {by}"))
+                .unwrap_or_default();
 
             let style = if i == app.selected {
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD)
+            } else if s.snagged_by.is_some() {
+                Style::default().fg(Color::Magenta)
             } else if s.state != "running" {
                 Style::default().fg(Color::DarkGray)
             } else {
@@ -42,7 +49,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
             let id_short = &s.id[..8.min(s.id.len())];
             ListItem::new(Line::from(vec![Span::styled(
-                format!("{marker}{id_short}  {name:<10} {shell:<6} {cwd:<25} {fg}{type_marker}"),
+                format!("{marker}{id_short}  {name:<10} {shell:<6} {cwd:<25} {fg}{type_marker}{snagged}"),
                 style,
             )]))
         })
@@ -110,7 +117,14 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     // Status bar
     let status_text = match app.input_mode {
-        InputMode::Normal => " [n]ew [x]kill [r]ename [s]end [Enter]attach [q]uit".to_string(),
+        InputMode::Normal => {
+            let hide_label = if app.hide_snagged {
+                "[h]show snagged"
+            } else {
+                "[h]hide snagged"
+            };
+            format!(" [n]ew [x]kill [r]ename [s]end [Enter]attach {hide_label} [q]uit")
+        }
         InputMode::Rename => {
             format!(" Rename: {}  [Enter]confirm [Esc]cancel", app.input_buffer)
         }

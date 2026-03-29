@@ -140,6 +140,14 @@ impl SessionRegistry {
     pub fn session_ids(&self) -> Vec<SessionId> {
         self.sessions.keys().cloned().collect()
     }
+
+    /// Find a session whose pts_path matches the given path.
+    pub fn find_by_pts(&self, pts_path: &std::path::Path) -> Option<&str> {
+        self.sessions
+            .iter()
+            .find(|(_, s)| s.pts_path == pts_path)
+            .map(|(id, _)| id.as_str())
+    }
 }
 
 #[cfg(test)]
@@ -168,6 +176,7 @@ mod tests {
             registered: false,
             capture_path: None,
             capture_abort: None,
+            in_alternate_screen: false,
         }
     }
 
