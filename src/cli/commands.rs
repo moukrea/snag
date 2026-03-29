@@ -59,7 +59,13 @@ pub fn cmd_wrap(capture: &str) -> Result<()> {
             if slave_raw > libc::STDERR_FILENO {
                 let _ = close(slave_raw);
             }
-            let shell_cstr = CString::new(shell.as_str()).unwrap();
+            let shell_cstr = match CString::new(shell.as_str()) {
+                Ok(c) => c,
+                Err(_) => {
+                    eprintln!("error: SHELL contains invalid characters");
+                    unsafe { libc::_exit(1) };
+                }
+            };
             let _ = execvp(&shell_cstr, std::slice::from_ref(&shell_cstr));
             unsafe {
                 libc::_exit(127);

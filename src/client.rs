@@ -90,7 +90,10 @@ fn start_daemon(config: &Config) -> Result<()> {
             let _ = nix::unistd::dup2(devnull.as_raw_fd(), nix::libc::STDIN_FILENO);
             let _ = nix::unistd::dup2(devnull.as_raw_fd(), nix::libc::STDOUT_FILENO);
             // Keep stderr for daemon logging
-            let log_path = socket_path.parent().unwrap().join("snagd.log");
+            let log_path = socket_path
+                .parent()
+                .unwrap_or(std::path::Path::new("/tmp"))
+                .join("snagd.log");
             if let Ok(log) = std::fs::File::create(&log_path) {
                 let _ = nix::unistd::dup2(log.as_raw_fd(), nix::libc::STDERR_FILENO);
             }
