@@ -59,14 +59,32 @@ pub fn cmd_wrap(capture: &str) -> Result<()> {
             if slave_raw > libc::STDERR_FILENO {
                 let _ = close(slave_raw);
             }
-            let shell_cstr = match CString::new(shell.as_str()) {
+            // Decrement SHLVL so the inner shell sees the expected level
+            // (the outer shell already incremented it; exec snag wrap preserved that)
+            if let Ok(val) = std::env::var("SHLVL") {
+                if let Ok(level) = val.parse::<i32>() {
+                    unsafe { std::env::set_var("SHLVL", (level - 1).max(0).to_string()) };
+                }
+            }
+            // Start a login shell (argv[0] = "-bash") so /etc/profile.d/*.sh is
+            // sourced — this restores VTE terminal integration (__vte_prompt_command,
+            // __vte_osc7) which provides dynamic title updates and CWD tracking.
+            let shell_path_cstr = match CString::new(shell.as_str()) {
                 Ok(c) => c,
                 Err(_) => {
                     eprintln!("error: SHELL contains invalid characters");
                     unsafe { libc::_exit(1) };
                 }
             };
-            let _ = execvp(&shell_cstr, std::slice::from_ref(&shell_cstr));
+            let shell_basename = shell.rsplit('/').next().unwrap_or(&shell);
+            let login_argv0 = match CString::new(format!("-{shell_basename}")) {
+                Ok(c) => c,
+                Err(_) => {
+                    eprintln!("error: SHELL contains invalid characters");
+                    unsafe { libc::_exit(1) };
+                }
+            };
+            let _ = execvp(&shell_path_cstr, std::slice::from_ref(&login_argv0));
             unsafe {
                 libc::_exit(127);
             }
@@ -85,12 +103,6 @@ pub fn cmd_wrap(capture: &str) -> Result<()> {
                 .write(true)
                 .open("/dev/tty")
                 .unwrap_or_else(|_| unsafe { std::fs::File::from_raw_fd(libc::STDOUT_FILENO) });
-
-            // Set initial terminal title to the shell name (not "snag")
-            let shell_name = shell.rsplit('/').next().unwrap_or(&shell);
-            let title_seq = format!("\x1b]0;{shell_name}\x07");
-            let _ = std::io::Write::write_all(&mut tty_out, title_seq.as_bytes());
-            let _ = std::io::Write::flush(&mut tty_out);
 
             // Put outer terminal in raw mode — but use minimal raw mode
             // (like script does) to preserve mouse tracking and scroll behavior.
@@ -254,6 +266,12 @@ pub fn cmd_wrap(capture: &str) -> Result<()> {
                         break;
                     }
                     let data = &buf[..n as usize];
+                    // Track inner shell's CWD via OSC 7 sequences so that
+                    // /proc/<proxy_pid>/cwd stays current (used by terminal
+                    // emulators for new-tab CWD and by `snag cwd`/`snag ls`).
+                    if let Some(path) = extract_osc7_path(data) {
+                        let _ = std::env::set_current_dir(&path);
+                    }
                     if !is_snagged {
                         let _ = std::io::Write::write_all(&mut tty_out, data);
                         let _ = std::io::Write::flush(&mut tty_out);
@@ -300,6 +318,74 @@ pub fn cmd_wrap(capture: &str) -> Result<()> {
                 _ => std::process::exit(0),
             }
         }
+    }
+}
+
+/// Scan a data buffer for OSC 7 sequences and extract the directory path.
+/// OSC 7 format: `\x1b]7;file://HOSTNAME/PATH<terminator>` where terminator
+/// is BEL (`\x07`) or ST (`\x1b\\`). Returns the last path found, if any.
+fn extract_osc7_path(data: &[u8]) -> Option<String> {
+    const PREFIX: &[u8] = b"\x1b]7;";
+    let mut last_path: Option<String> = None;
+    let mut i = 0;
+    while i + PREFIX.len() < data.len() {
+        if data[i..].starts_with(PREFIX) {
+            let start = i + PREFIX.len();
+            // Find terminator: BEL (\x07) or ST (\x1b\\)
+            let mut end = None;
+            for j in start..data.len() {
+                if data[j] == 0x07 {
+                    end = Some(j);
+                    break;
+                }
+                if data[j] == 0x1b && j + 1 < data.len() && data[j + 1] == b'\\' {
+                    end = Some(j);
+                    break;
+                }
+            }
+            if let Some(end) = end {
+                if let Ok(uri) = std::str::from_utf8(&data[start..end]) {
+                    // Strip "file://hostname" prefix — path starts at the first '/' after "//"
+                    if let Some(rest) = uri.strip_prefix("file://") {
+                        if let Some(slash) = rest.find('/') {
+                            last_path = Some(percent_decode(&rest[slash..]));
+                        }
+                    }
+                }
+                i = end + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    last_path
+}
+
+/// Minimal percent-decoding for file paths (e.g. `%20` → space).
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (from_hex(bytes[i + 1]), from_hex(bytes[i + 2])) {
+                out.push(hi << 4 | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
+fn from_hex(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -939,5 +1025,71 @@ pub async fn cmd_daemon_status(config: &Config) -> Result<()> {
             eprintln!("unexpected response");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn osc7_bel_terminator() {
+        let data = b"\x1b]7;file://myhost/home/user/project\x07";
+        assert_eq!(
+            extract_osc7_path(data),
+            Some("/home/user/project".to_string())
+        );
+    }
+
+    #[test]
+    fn osc7_st_terminator() {
+        let data = b"\x1b]7;file://myhost/tmp\x1b\\";
+        assert_eq!(extract_osc7_path(data), Some("/tmp".to_string()));
+    }
+
+    #[test]
+    fn osc7_percent_encoded() {
+        let data = b"\x1b]7;file://host/home/user/my%20folder\x07";
+        assert_eq!(
+            extract_osc7_path(data),
+            Some("/home/user/my folder".to_string())
+        );
+    }
+
+    #[test]
+    fn osc7_no_match() {
+        let data = b"normal terminal output with no osc sequences";
+        assert_eq!(extract_osc7_path(data), None);
+    }
+
+    #[test]
+    fn osc7_embedded_in_output() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"prompt$ \x1b[32m");
+        data.extend_from_slice(b"\x1b]7;file://host/var/log\x07");
+        data.extend_from_slice(b" more output");
+        assert_eq!(extract_osc7_path(&data), Some("/var/log".to_string()));
+    }
+
+    #[test]
+    fn osc7_multiple_returns_last() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"\x1b]7;file://host/first\x07");
+        data.extend_from_slice(b"\x1b]7;file://host/second\x07");
+        assert_eq!(extract_osc7_path(&data), Some("/second".to_string()));
+    }
+
+    #[test]
+    fn osc7_root_path() {
+        let data = b"\x1b]7;file://host/\x07";
+        assert_eq!(extract_osc7_path(data), Some("/".to_string()));
+    }
+
+    #[test]
+    fn percent_decode_basic() {
+        assert_eq!(percent_decode("/path/to/file"), "/path/to/file");
+        assert_eq!(percent_decode("/has%20space"), "/has space");
+        assert_eq!(percent_decode("%2Fencoded%2Fslash"), "/encoded/slash");
+        assert_eq!(percent_decode("100%25done"), "100%done");
     }
 }
