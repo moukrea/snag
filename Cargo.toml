@@ -1,6 +1,6 @@
 [package]
 name = "snag"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 description = "Local PTY session multiplexer — spawn, discover, attach to, and interact with any shell session"
 license = "MIT"
