@@ -4,7 +4,7 @@ use nix::pty::openpty;
 use nix::sys::wait::WaitStatus;
 use nix::unistd::{close, dup2, fork, setsid, ForkResult, Pid};
 use std::ffi::CString;
-use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 
 pub struct SpawnResult {
@@ -183,4 +183,15 @@ pub fn fg_process(pts_path: &Path) -> Vec<(u32, String)> {
     }
 
     results
+}
+
+/// Get the foreground process name for a PTY via tcgetpgrp.
+/// Returns "idle" if the shell is in the foreground, the command name
+/// if another process is running, or None on error.
+pub fn fg_process_name(master_fd: &impl AsFd, shell_pid: Option<Pid>) -> Option<String> {
+    let pgid = nix::unistd::tcgetpgrp(master_fd).ok()?;
+    if shell_pid.is_some_and(|sp| sp == pgid) {
+        return Some("idle".to_string());
+    }
+    read_comm(pgid.as_raw() as u32).or(Some("idle".to_string()))
 }
