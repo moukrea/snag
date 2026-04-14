@@ -840,15 +840,14 @@ pub async fn cmd_register(config: &Config, pid: Option<u32>, name: Option<String
         })
         .await?;
     match resp {
-        Response::Ok(ResponseData::SessionRegistered { id, capture_path }) => {
-            // Print shell commands for the hook to eval.
-            // Use tee-based capture (same as adopted sessions) to preserve
-            // the terminal's direct relationship with the shell — tab titles,
-            // CWD tracking, colors, and all shell integrations work normally.
-            let escaped_path = capture_path.replace('\'', "'\\''");
+        Response::Ok(ResponseData::SessionRegistered { id, .. }) => {
+            // Only export the session ID — no exec, no redirect, no child
+            // processes. The shell continues completely unmodified so titles,
+            // CWD, colors, isatty(), and TUI apps all work normally.
+            // Output capture is not available for hooked sessions (snag output
+            // won't have scrollback), but ls/cwd/ps/attach/send all work via
+            // /proc and the stolen master fd.
             println!("export SNAG_SESSION={id}");
-            println!("export SNAG_CAPTURE='{escaped_path}'");
-            println!("exec > >(tee -a '{escaped_path}') 2>&1");
             Ok(())
         }
         Response::Error { message, .. } => {

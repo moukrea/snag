@@ -100,22 +100,7 @@ impl Session {
             .and_then(|pid| pty::read_cwd(pid.as_raw() as u32))
             .unwrap_or_else(|| "?".to_string());
 
-        let fg = pty::fg_process(&self.pts_path);
-        let fg_process = fg
-            .iter()
-            .find(|(pid, _)| {
-                self.child_pid
-                    .map(|cp| *pid != cp.as_raw() as u32)
-                    .unwrap_or(true)
-            })
-            .map(|(_, cmd)| cmd.clone())
-            .or_else(|| {
-                if fg.is_empty() {
-                    None
-                } else {
-                    Some("idle".to_string())
-                }
-            });
+        let fg_process = pty::fg_process_name(&self.master_fd, self.child_pid);
 
         SessionInfo {
             id: self.id.clone(),
